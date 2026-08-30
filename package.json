@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@floating-ui/dom": "^1.8.0",
+    "@langchain/core": "^1.2.9",
+    "@langchain/langgraph": "^1.4.13",
     "@simonwep/pickr": "^1.10.1",
     "@vscode/codicons": "^0.0.46-24",
     "express": "^4.21.2",

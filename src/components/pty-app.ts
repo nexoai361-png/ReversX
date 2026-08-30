@@ -56,6 +56,7 @@ export class PtyApp extends LitElement {
   @state() terminalCursorStyle: string = "block";
   @state() terminalCursorStyleLabel: string = "Blinking Block";
   @state() wordWrap: boolean = true;
+  @state() appDpi: number = 400;
   @state() terminalFontSize: number = 14;
   @state() terminalCustomFg: string = '#cccccc';
   @state() terminalCustomBg: string = '#1e1e1e';
@@ -174,6 +175,7 @@ export class PtyApp extends LitElement {
   @state() tooltipText: string = '';
   @state() tooltipX: number = 0;
   @state() tooltipY: number = 0;
+  @state() private dropupMenuOpen: boolean = false;
   private tooltipTimer: any = null;
   private toolbarHideTimer: any;
 
@@ -383,6 +385,7 @@ export class PtyApp extends LitElement {
     this.tryAttachSession();
     this.initColorPickers();
     document.documentElement.style.setProperty('--font-ui', this.appFont);
+    this.applyAppDpi(this.appDpi);
 
     this.isStatusBarVisible = true;
   }
@@ -646,10 +649,32 @@ export class PtyApp extends LitElement {
           if (found) this.uiAnimationLabel = found.label;
           this.applyUiAnimationToDOM();
         }
+
+        if (data.appDpi) {
+          const dpiVal = Math.min(600, Math.max(400, Number(data.appDpi) || 400));
+          this.appDpi = dpiVal;
+          this.applyAppDpi(dpiVal);
+        }
       } catch (e) {
         console.error("Failed parsing preferences", e);
       }
     }
+  }
+
+  private applyAppDpi(dpi: number) {
+    const clamped = Math.min(600, Math.max(400, Number(dpi) || 400));
+    this.appDpi = clamped;
+    const scale = 400 / clamped;
+    document.documentElement.style.setProperty('--app-dpi', `${clamped}`);
+    document.documentElement.style.setProperty('--app-scale', `${scale}`);
+    (document.documentElement.style as any).zoom = `${scale}`;
+    this.savePrefs();
+  }
+
+  private handleDpiChange(e: Event) {
+    const target = e.target as HTMLInputElement;
+    const val = Number(target.value);
+    this.applyAppDpi(val);
   }
 
   private applyUiAnimationToDOM() {
@@ -694,10 +719,23 @@ export class PtyApp extends LitElement {
     this.clampSearchBarPosition();
   };
 
+  private toggleTitleDropup = (e: MouseEvent) => {
+    e.stopPropagation();
+    this.dropupMenuOpen = !this.dropupMenuOpen;
+  };
+
+  private handleReloadApp = () => {
+    this.dropupMenuOpen = false;
+    location.reload();
+  };
+
   private onWindowClick = (event: MouseEvent) => {
     const target = event.target as HTMLElement;
     if (this.isSidebarOpen && !target.closest('.sidebar-drawer') && !target.closest('.hamburger-menu-btn')) {
       this.isSidebarOpen = false;
+    }
+    if (this.dropupMenuOpen && !target.closest('.menu-container')) {
+      this.dropupMenuOpen = false;
     }
     if (!target.closest('.custom-select')) {
       this.appFontDropdownActive = false;
@@ -1188,6 +1226,7 @@ export class PtyApp extends LitElement {
       terminalCustomFg: this.terminalCustomFg,
       terminalCustomBg: this.terminalCustomBg,
       wordWrap: this.wordWrap,
+      appDpi: this.appDpi,
       uiStyle: this.uiStyle,
       uiAnimation: this.uiAnimation,
       wsBridgeUrl: this.wsBridgeUrl
@@ -2125,8 +2164,13 @@ export class PtyApp extends LitElement {
       <!-- Welcome View -->
       <div id="welcome-view" class="view ${this.activeTab === 'welcome' ? 'active' : ''}">
         <div class="welcome-pane">
-          <div class="welcome-title-box">
-            <h1>ReversX PTY Terminal</h1>
+          <div class="menu-container">
+            <div class="dropup-menu ${this.dropupMenuOpen ? 'show' : ''}" id="dropupMenu">
+              <div class="dropup-item" @click="${this.handleReloadApp}">Reload the App</div>
+            </div>
+            <div class="terminal-box" id="terminalBtn" @click="${this.toggleTitleDropup}">
+              ReversX PTY Terminal
+            </div>
           </div>
           <div class="welcome-grid">
             <div class="welcome-section">
@@ -2361,6 +2405,29 @@ export class PtyApp extends LitElement {
                 <span class="font-icon small">A</span>
                 <input type="range" min="10" max="30" step="1" .value="${this.terminalFontSize}" @input="${this.handleFontSizeChange}" data-tooltip="Adjust terminal font size">
                 <span class="font-icon large">A</span>
+              </div>
+            </div>
+
+            <div class="field">
+              <label>App DPI Customization (${this.appDpi} dp)</label>
+              <div class="description">Adjust application display density (Smallest Width DPI) between 400 and 600 dp, matching Android Developer Settings.</div>
+              <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
+                <div class="android-font-slider" style="display: flex; align-items: center; gap: 12px;">
+                  <span style="font-size: 11px; color: var(--text-dim); font-family: var(--font-code, 'JetBrains Mono', monospace); font-weight: 600;">400 dp</span>
+                  <input type="range" min="400" max="600" step="5" .value="${this.appDpi}" @input="${this.handleDpiChange}" data-tooltip="Adjust App DPI (400 - 600 dp)" style="flex: 1;" />
+                  <span style="font-size: 11px; color: var(--text-dim); font-family: var(--font-code, 'JetBrains Mono', monospace); font-weight: 600;">600 dp</span>
+                </div>
+                <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px;">
+                  ${[400, 440, 480, 520, 560, 600].map(val => html`
+                    <button
+                      type="button"
+                      @click="${() => this.applyAppDpi(val)}"
+                      style="background: ${this.appDpi === val ? 'var(--accent, #007acc)' : 'var(--input-bg, #1e1e1e)'}; border: 1px solid ${this.appDpi === val ? 'var(--accent, #007acc)' : 'var(--input-border, #3c3c3c)'}; color: #ffffff; font-size: 11px; padding: 4px 10px; border-radius: 0; cursor: pointer; font-family: var(--font-code, 'JetBrains Mono', monospace); font-weight: ${this.appDpi === val ? '700' : '400'}; transition: all 0.15s ease;"
+                    >
+                      ${val} dp ${val === 400 ? '(Default)' : ''}
+                    </button>
+                  `)}
+                </div>
               </div>
             </div>
 
@@ -2687,6 +2754,52 @@ export class PtyApp extends LitElement {
                     <p class="description" style="margin-top: 8px;">সবশেষে <strong>Connect Session</strong> এ ট্যাপ করুন এবং স্মুথ পিটিআই টার্মিনাল অভিজ্ঞতা উপভোগ করুন!</p>
                   </div>
                 </div>
+
+                <div class="doc-card" style="margin-top: 16px;">
+                  <div class="doc-badge">LANGGRAPH AI & BYOK</div>
+                  <h3>ReversX AI Backend এবং BYOK কনফিগারেশন নির্দেশিকা</h3>
+                  <p class="description" style="font-size: 13px; color: var(--text-normal); margin-bottom: 16px;">
+                    ReversX AI প্যানেলে নিজস্ব API Key (BYOK) ব্যবহার করে রিয়েল-টাইম এআই মডেল এবং LangGraph অর্কেস্ট্রেটর রান করার সম্পূর্ণ গাইড:
+                  </p>
+
+                  <div class="doc-step">
+                    <div class="doc-step-num">A</div>
+                    <div>
+                      <strong>LangGraph AI ব্যাকএন্ড চালু করুন (Termux / Proot-Ubuntu)</strong>
+                      <p class="description" style="margin-bottom: 8px;">আপনার Termux বা Proot-Ubuntu টার্মিনালে লোকাল এআই সার্ভিসটি চালু করুন:</p>
+                      <div style="position: relative; margin-bottom: 12px; border: 1px solid #303030; border-radius: 4px; overflow: hidden; background: #181818; max-width: 100%;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; background: #252526; padding: 4px 12px; border-bottom: 1px solid #303030; font-size: 11px; font-family: 'Lato', sans-serif;">
+                          <span style="color: #a0a0a0;">${this.renderHeroicon('terminal', 'margin-right: 4px; vertical-align: middle;', 12)} Terminal</span>
+                          <button style="background: none; border: 1px solid rgba(255,255,255,0.15); color: #ccc; border-radius: 3px; padding: 2px 6px; font-size: 11px; cursor: pointer; display: flex; align-items: center; gap: 4px; font-family: 'Lato', sans-serif; transition: all 0.1s;" @click="${(e: Event) => this.copyCommandText('node ai_backend.js', e)}">
+                            ${this.renderHeroicon('copy', 'margin-right: 4px; vertical-align: middle;', 11)} Copy
+                          </button>
+                        </div>
+                        <code style="display: block; padding: 10px 12px; color: #9cdcfe; font-family: monospace; font-size: 12px; border: none; border-radius: 0; background: transparent; margin: 0; overflow-x: auto; white-space: pre;">node ai_backend.js</code>
+                      </div>
+                      <p class="description">সার্ভার চালু হলে Port 3001 এ <span style="color: #10B981;">ReversX LangGraph AI Backend running on port 3001</span> মেসেজটি দেখতে পাবেন।</p>
+                    </div>
+                  </div>
+
+                  <div class="doc-step">
+                    <div class="doc-step-num">B</div>
+                    <div>
+                      <strong>ফ্রন্টএন্ড থেকে ব্যাকএন্ড কানেক্ট করুন</strong>
+                      <p class="description">
+                        আপনার Cordova APK বা ব্রাউজারে ReversX প্যানেল খুললে এটি স্বয়ংক্রিয়ভাবে <code style="background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 4px;">http://127.0.0.1:3001</code> সাথে কানেক্ট হয়ে হেডার এ <span style="color: #10B981;">● ONLINE</span> স্ট্যাটাস দেখাবে।
+                      </p>
+                    </div>
+                  </div>
+
+                  <div class="doc-step">
+                    <div class="doc-step-num">C</div>
+                    <div>
+                      <strong>BYOK (Bring Your Own Key) সেটআপ</strong>
+                      <p class="description">
+                        ReversX হেডার এর ডানে গিয়ার (Settings) আইকনে ট্যাপ করুন। এরপর আপনার পছন্দের Provider (OpenRouter, Groq, SambaNova, Google AI Studio, Cerebras) নির্বাচন করে API Key এবং Model Name বসিয়ে <strong>Save Credentials</strong> এ ক্লিক করুন। এই কি-গুলো আপনার ডিভাইসে লোকালি সুরক্ষিতভাবে সংরক্ষিত থাকে।
+                      </p>
+                    </div>
+                  </div>
+                </div>
               ` : html`
                 <h3>Termux WebSocket Bridge & SSH Server Setup</h3>
                 <p class="description" style="font-size: 13px; color: var(--text-normal); margin-bottom: 16px;">
@@ -2786,6 +2899,52 @@ export class PtyApp extends LitElement {
                       <li><strong>WebSocket Bridge URL:</strong> <code style="background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 4px;">ws://127.0.0.1:3000</code></li>
                     </ul>
                     <p class="description" style="margin-top: 8px;">Tap on <strong>Connect Session</strong> and enjoy responsive physical shell PTY controls!</p>
+                  </div>
+                </div>
+
+                <div class="doc-card" style="margin-top: 16px;">
+                  <div class="doc-badge">LANGGRAPH AI & BYOK</div>
+                  <h3>ReversX AI Backend & BYOK Setup Guide</h3>
+                  <p class="description" style="font-size: 13px; color: var(--text-normal); margin-bottom: 16px;">
+                    Follow these instructions to run the local LangGraph orchestration pipeline and configure Bring Your Own Key (BYOK) for OpenRouter, SambaNova, Google AI Studio, or Cerebras:
+                  </p>
+
+                  <div class="doc-step">
+                    <div class="doc-step-num">A</div>
+                    <div>
+                      <strong>Start LangGraph AI Backend (Termux / Proot-Ubuntu)</strong>
+                      <p class="description" style="margin-bottom: 8px;">Run the local AI service inside Termux or Proot-Ubuntu environment:</p>
+                      <div style="position: relative; margin-bottom: 12px; border: 1px solid #303030; border-radius: 4px; overflow: hidden; background: #181818; max-width: 100%;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; background: #252526; padding: 4px 12px; border-bottom: 1px solid #303030; font-size: 11px; font-family: 'Lato', sans-serif;">
+                          <span style="color: #a0a0a0;">${this.renderHeroicon('terminal', 'margin-right: 4px; vertical-align: middle;', 12)} Terminal</span>
+                          <button style="background: none; border: 1px solid rgba(255,255,255,0.15); color: #ccc; border-radius: 3px; padding: 2px 6px; font-size: 11px; cursor: pointer; display: flex; align-items: center; gap: 4px; font-family: 'Lato', sans-serif; transition: all 0.1s;" @click="${(e: Event) => this.copyCommandText('node ai_backend.js', e)}">
+                            ${this.renderHeroicon('copy', 'margin-right: 4px; vertical-align: middle;', 11)} Copy
+                          </button>
+                        </div>
+                        <code style="display: block; padding: 10px 12px; color: #9cdcfe; font-family: monospace; font-size: 12px; border: none; border-radius: 0; background: transparent; margin: 0; overflow-x: auto; white-space: pre;">node ai_backend.js</code>
+                      </div>
+                      <p class="description">Upon success, the server will log <span style="color: #10B981;">ReversX LangGraph AI Backend running on port 3001</span>.</p>
+                    </div>
+                  </div>
+
+                  <div class="doc-step">
+                    <div class="doc-step-num">B</div>
+                    <div>
+                      <strong>Connect Frontend App to Local Backend</strong>
+                      <p class="description">
+                        When opening the ReversX AI panel in your Cordova APK or mobile browser, it connects to <code style="background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 4px;">http://127.0.0.1:3001</code> and displays <span style="color: #10B981;">● ONLINE</span> status in the header.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div class="doc-step">
+                    <div class="doc-step-num">C</div>
+                    <div>
+                      <strong>Configure BYOK (Bring Your Own Key) Credentials</strong>
+                      <p class="description">
+                        Tap the Gear (Settings) button on the right side of the ReversX AI header. Select your AI provider (OpenRouter, Groq, SambaNova, Google AI Studio, Cerebras), paste your API key, enter the model name, and tap <strong>Save Credentials</strong>. All keys remain safely stored on device in localStorage.
+                      </p>
+                    </div>
                   </div>
                 </div>
               `}

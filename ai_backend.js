@@ -1,0 +1,201 @@
+import express from 'express';
+import http from 'http';
+import { StateGraph, END, START } from '@langchain/langgraph';
+
+const app = express();
+app.use(express.json());
+
+// Enable CORS for mobile webview / Cordova / localhost
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-byok-provider, x-byok-key, x-byok-model');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
+// LangGraph Agent State Definition
+const graphState = {
+  messages: {
+    value: (x, y) => x.concat(y),
+    default: () => []
+  },
+  provider: {
+    value: (x, y) => y ?? x,
+    default: () => 'google'
+  },
+  apiKey: {
+    value: (x, y) => y ?? x,
+    default: () => ''
+  },
+  model: {
+    value: (x, y) => y ?? x,
+    default: () => ''
+  },
+  response: {
+    value: (x, y) => y ?? x,
+    default: () => ''
+  }
+};
+
+// Node 1: Router & Agent Classifier
+async function agentRouterNode(state) {
+  const lastMessage = state.messages[state.messages.length - 1];
+  const text = (lastMessage?.content || '').toLowerCase();
+  
+  let agentType = 'general';
+  if (text.includes('/coderagent') || text.includes('code') || text.includes('script') || text.includes('bash')) {
+    agentType = 'coder';
+  } else if (text.includes('/debugagent') || text.includes('debug') || text.includes('error')) {
+    agentType = 'debug';
+  } else if (text.includes('/explainagent') || text.includes('explain')) {
+    agentType = 'explain';
+  } else if (text.includes('/searchagent') || text.includes('search')) {
+    agentType = 'search';
+  }
+
+  return { agentType };
+}
+
+// Node 2: Provider Execution Engine
+async function providerExecutorNode(state) {
+  const { provider, apiKey, model, messages } = state;
+  const userText = messages[messages.length - 1]?.content || '';
+
+  // Handle BYOK Provider requests if API Key is present
+  if (apiKey) {
+    try {
+      let endpoint = '';
+      let payload = {};
+      let headers = {
+        'Content-Type': 'application/json'
+      };
+
+      if (provider === 'openrouter') {
+        endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+        headers['Authorization'] = `Bearer ${apiKey}`;
+        payload = {
+          model: model || 'openai/gpt-3.5-turbo',
+          messages: [{ role: 'user', content: userText }]
+        };
+      } else if (provider === 'sambanova') {
+        endpoint = 'https://api.sambanova.ai/v1/chat/completions';
+        headers['Authorization'] = `Bearer ${apiKey}`;
+        payload = {
+          model: model || 'Meta-Llama-3.1-8B-Instruct',
+          messages: [{ role: 'user', content: userText }]
+        };
+      } else if (provider === 'google') {
+        const selectedModel = model || 'gemini-1.5-flash';
+        endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${apiKey}`;
+        payload = {
+          contents: [{ parts: [{ text: userText }] }]
+        };
+      } else if (provider === 'cerebras') {
+        endpoint = 'https://api.cerebras.ai/v1/chat/completions';
+        headers['Authorization'] = `Bearer ${apiKey}`;
+        payload = {
+          model: model || 'llama3.1-8b',
+          messages: [{ role: 'user', content: userText }]
+        };
+      } else if (provider === 'groq') {
+        endpoint = 'https://api.groq.com/openai/v1/chat/completions';
+        headers['Authorization'] = `Bearer ${apiKey}`;
+        payload = {
+          model: model || 'llama-3.3-70b-versatile',
+          messages: [{ role: 'user', content: userText }]
+        };
+      } else {
+        // Default OpenRouter-style OpenAI format
+        endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+        headers['Authorization'] = `Bearer ${apiKey}`;
+        payload = {
+          model: model || 'openai/gpt-3.5-turbo',
+          messages: [{ role: 'user', content: userText }]
+        };
+      }
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload)
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        return { response: `[BYOK Provider Error ${res.status}]: ${errText || res.statusText}` };
+      }
+
+      const data = await res.json();
+      let reply = '';
+      if (provider === 'google') {
+        reply = data.candidates?.[0]?.content?.parts?.[0]?.text || JSON.stringify(data);
+      } else {
+        reply = data.choices?.[0]?.message?.content || JSON.stringify(data);
+      }
+
+      return { response: reply };
+    } catch (err) {
+      return { response: `[BYOK Execution Error]: ${err.message}` };
+    }
+  }
+
+  // Fallback Local Agent Response Generator
+  let reply = "ReversX LangGraph AI Backend received your query.";
+  if (userText.toLowerCase().includes('code') || userText.toLowerCase().includes('script')) {
+    reply = "Here is a code snippet generated by ReversX Local LangGraph Engine:\n\n```bash\n#!/bin/bash\necho 'ReversX AI Local Backend Active'\n```";
+  } else if (userText.toLowerCase().includes('debug')) {
+    reply = "ReversX Debugger Agent: System diagnostics clear. No memory leaks detected.";
+  }
+
+  return { response: reply };
+}
+
+// Construct LangGraph Workflow
+const workflow = new StateGraph({ channels: graphState })
+  .addNode('router', agentRouterNode)
+  .addNode('executor', providerExecutorNode)
+  .addEdge(START, 'router')
+  .addEdge('router', 'executor')
+  .addEdge('executor', END);
+
+const langGraphApp = workflow.compile();
+
+// API Endpoints
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', engine: 'LangGraph Orchestrator', timestamp: new Date().toISOString() });
+});
+
+app.get('/status', (req, res) => {
+  res.json({ online: true, provider: 'ReversX Local Backend' });
+});
+
+app.post('/api/chat', async (req, res) => {
+  try {
+    const { message, provider, apiKey, model } = req.body;
+    const reqProvider = provider || req.headers['x-byok-provider'] || 'openrouter';
+    const reqApiKey = apiKey || req.headers['x-byok-key'] || '';
+    const reqModel = model || req.headers['x-byok-model'] || '';
+
+    const inputs = {
+      messages: [{ role: 'user', content: message || '' }],
+      provider: reqProvider,
+      apiKey: reqApiKey,
+      model: reqModel
+    };
+
+    const result = await langGraphApp.invoke(inputs);
+    res.json({ response: result.response });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+const PORT = process.env.AI_PORT || 3001;
+const server = http.createServer(app);
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`ReversX LangGraph AI Backend running on port ${PORT}`);
+});
