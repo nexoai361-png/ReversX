@@ -2,6 +2,7 @@ import express from 'express';
 import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import { Client } from 'ssh2';
+import { spawn } from 'child_process';
 import { StringDecoder } from 'node:string_decoder';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -24,6 +25,15 @@ app.use((req, res, next) => {
 
 // Mount dedicated LangGraph & LangChain AI backend
 app.use('/api', langgraphRouter);
+
+// Root health & status endpoints for mobile / web / proot-ubuntu
+app.get('/status', (req, res) => {
+  res.json({ status: 'online', engine: 'ReversX Unified Server & LangGraph AI Backend', time: Date.now() });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', engine: 'ReversX LangGraph Backend', time: new Date().toISOString() });
+});
 
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
@@ -100,6 +110,7 @@ class PTYSession {
     this.ws = socket;
     this.client = new Client();
     this.stream = null;
+    this.localProcess = null;
     this.isDead = false;
     this.lastActivity = Date.now();
     this.config = null;
@@ -124,10 +135,7 @@ class PTYSession {
     this.lastActivity = Date.now();
     this.notify('status', 'READY');
     this.notify('session_info', { id: this.id, token: this.token });
-    // Re-send current state if possible? 
-    // Usually, the terminal buffer is on the client. 
-    // But we can trigger a "sync" if needed.
-    this.notify('data', '\r\n\x1b[33m[SYSTEM] Reconnected to session.\x1b[0m\r\n');
+    this.notify('data', '\r\n\x1b[33m[SYSTEM] Reconnected to active session.\x1b[0m\r\n');
   }
 
   detach() {
@@ -153,12 +161,85 @@ class PTYSession {
     }
   }
 
+  startLocalShell(notice = '') {
+    if (this.isDead) return;
+    try {
+      if (notice) {
+        this.notify('data', `\r\n\x1b[33m${notice}\x1b[0m\r\n`);
+      }
+      this.notify('data', '\x1b[32m[SYSTEM] Initializing Proot/Linux Interactive Shell (bash/sh)...\x1b[0m\r\n');
+      
+      const shell = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/bash');
+      const args = process.platform === 'win32' ? [] : ['-i'];
+      
+      const proc = spawn(shell, args, {
+        env: {
+          ...process.env,
+          TERM: 'xterm-256color',
+          COLORTERM: 'truecolor',
+          LANG: 'en_US.UTF-8',
+          LC_ALL: 'en_US.UTF-8',
+          FORCE_COLOR: '3',
+          PAGER: 'cat',
+          EDITOR: 'nano',
+          ...(this.config?.env || {})
+        },
+        cwd: process.env.HOME || process.cwd()
+      });
+
+      this.localProcess = proc;
+      this.notify('status', 'READY');
+      this.notify('session_info', { id: this.id, token: this.token });
+      this.notify('data', '\x1b[36m[SYSTEM] Interactive PTY Shell Online. Ready for commands.\x1b[0m\r\n\r\n');
+
+      proc.stdout.on('data', (d) => {
+        this.lastActivity = Date.now();
+        this.notify('data', this.decoder.write(d));
+      });
+
+      proc.stderr.on('data', (d) => {
+        this.lastActivity = Date.now();
+        this.notify('data', this.decoder.write(d));
+      });
+
+      proc.on('error', (err) => {
+        logger.error(`[${this.id}] Local process spawn error:`, err);
+        // Fallback to /bin/sh if bash failed
+        if (shell !== '/bin/sh') {
+          try {
+            const shProc = spawn('/bin/sh', ['-i'], {
+              env: process.env,
+              cwd: process.cwd()
+            });
+            this.localProcess = shProc;
+            shProc.stdout.on('data', (d) => this.notify('data', this.decoder.write(d)));
+            shProc.stderr.on('data', (d) => this.notify('data', this.decoder.write(d)));
+            shProc.on('close', () => this.destroy('PROCESS_EXIT'));
+            return;
+          } catch(e) {}
+        }
+        this.notify('error', 'SHELL_SPAWN_ERROR: ' + err.message);
+      });
+
+      proc.on('close', (code) => {
+        logger.info(`[${this.id}] Local shell process exited with code ${code}`);
+        this.destroy('PROCESS_EXIT');
+      });
+    } catch (err) {
+      logger.error(`[${this.id}] Failed to spawn local shell:`, err);
+      this.notify('error', 'LOCAL_SHELL_FAILED: ' + err.message);
+      this.destroy('LOCAL_SHELL_ERROR');
+    }
+  }
+
   async connect(cfg) {
     this.config = cfg;
     this.lastActivity = Date.now();
-    logger.info(`[${this.id}] SSH Connect attempt: ${cfg.username}@${cfg.host}`);
+    logger.info(`[${this.id}] Connect attempt: ${cfg.username}@${cfg.host}:${cfg.port || 8022}`);
     
     this.notify('status', 'CONNECTING');
+
+    const isLocalTarget = !cfg.host || cfg.host === '127.0.0.1' || cfg.host === 'localhost' || cfg.host === 'local';
 
     this.client.on('banner', (msg) => this.notify('banner', msg));
 
@@ -186,6 +267,10 @@ class PTYSession {
       }, (err, stream) => {
         if (err) {
           logger.error(`[${this.id}] Shell error:`, err);
+          if (isLocalTarget) {
+            this.startLocalShell('[NOTICE] SSH shell init failed. Falling back to local interactive shell.');
+            return;
+          }
           return this.notify('error', 'SHELL_INIT_FAILED: ' + err.message);
         }
         
@@ -220,7 +305,15 @@ class PTYSession {
     });
 
     this.client.on('error', (err) => {
-      logger.error(`[${this.id}] SSH Client error:`, err.message);
+      logger.warn(`[${this.id}] SSH Client error (${err.code || err.level || err.message})`);
+      
+      // If connecting locally and SSH daemon isn't running or refused, seamlessly fallback to local shell
+      if (isLocalTarget || err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ENOTFOUND') {
+        logger.info(`[${this.id}] SSH not available on ${cfg.host}. Launching local shell fallback.`);
+        this.startLocalShell(`[NOTICE] SSH server not reachable on ${cfg.host}:${cfg.port || 8022}. Switched to Native Terminal.`);
+        return;
+      }
+
       const msg = err.level === 'client-authentication' 
         ? 'AUTH_FAILED: Invalid credentials or SSH configuration' 
         : `SSH_ERROR: ${err.message}`;
@@ -228,31 +321,49 @@ class PTYSession {
       this.destroy('SSH_ERROR');
     });
 
-    this.client.on('end', () => this.destroy('SSH_ENDED'));
-    this.client.on('close', () => this.destroy('SSH_CLOSED'));
+    this.client.on('end', () => {
+      if (!this.localProcess) this.destroy('SSH_ENDED');
+    });
+    this.client.on('close', () => {
+      if (!this.localProcess) this.destroy('SSH_CLOSED');
+    });
 
     try {
       this.client.connect({
-        host: cfg.host,
+        host: cfg.host || '127.0.0.1',
         port: parseInt(cfg.port) || 8022,
-        username: cfg.username,
-        password: cfg.password,
-        readyTimeout: 15000,
+        username: cfg.username || 'termux',
+        password: cfg.password || '',
+        readyTimeout: 10000,
         keepaliveInterval: 5000,
         keepaliveCountMax: 3,
         debug: (msg) => logger.debug(`[${this.id} SSH-DEBUG] ${msg}`)
       });
     } catch (e) {
       logger.error(`[${this.id}] Connection exception:`, e);
-      this.notify('error', 'CONN_EXCEPTION: ' + e.message);
-      this.destroy('EXCEPTION');
+      if (isLocalTarget) {
+        this.startLocalShell('[NOTICE] SSH connection exception. Falling back to local interactive shell.');
+      } else {
+        this.notify('error', 'CONN_EXCEPTION: ' + e.message);
+        this.destroy('EXCEPTION');
+      }
     }
   }
 
   write(data) {
     if (this.isDead) return;
     this.lastActivity = Date.now();
-    if (this.stream && this.stream.writable) {
+    if (this.localProcess && this.localProcess.stdin && this.localProcess.stdin.writable) {
+      // In piped shell instances, convert carriage returns to newlines so bash executes commands
+      const inputStr = typeof data === 'string' ? data : data.toString();
+      const hasCR = inputStr.includes('\r');
+      const normalized = inputStr.replace(/\r/g, '\n');
+      this.localProcess.stdin.write(normalized);
+      // Echo carriage return + newline or typed character back to terminal if needed
+      if (hasCR) {
+        this.notify('data', '\r\n');
+      }
+    } else if (this.stream && this.stream.writable) {
       this.stream.write(data);
     }
   }
@@ -276,6 +387,13 @@ class PTYSession {
     
     logger.info(`[${this.id}] Destroying session. Reason: ${reason}`);
     
+    if (this.localProcess) {
+      try {
+        this.localProcess.kill();
+      } catch (e) {}
+      this.localProcess = null;
+    }
+
     if (this.stream) {
       this.stream.end();
       this.stream = null;

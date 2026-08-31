@@ -811,17 +811,16 @@ export class PtyApp extends LitElement {
     if (this.wsBridgeUrl && this.wsBridgeUrl.trim()) {
       url = this.wsBridgeUrl.trim();
     } else {
-      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const isLocalHost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-      const isCordovaOrCapacitor = typeof (window as any).cordova !== 'undefined' || 
-                                   location.protocol === 'file:' || 
-                                   location.protocol.startsWith('capacitor') || 
-                                   location.protocol.startsWith('app') || 
-                                   location.origin.includes('localhost');
+      const isCordovaOrFile = typeof (window as any).cordova !== 'undefined' || 
+                              location.protocol === 'file:' || 
+                              location.protocol.startsWith('capacitor') || 
+                              location.protocol.startsWith('app') ||
+                              !location.host;
 
-      if (isLocalHost || isCordovaOrCapacitor) {
+      if (isCordovaOrFile) {
         url = 'ws://127.0.0.1:3000';
       } else {
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         url = `${proto}//${location.host}`;
       }
     }
@@ -913,6 +912,9 @@ export class PtyApp extends LitElement {
     this.activeTab = view;
     this.isSidebarOpen = false;
     if (view === 'terminal') {
+      if (!this.ws || this.ws.readyState !== 1) {
+        this.startSession();
+      }
       setTimeout(() => {
         this.triggerManualResize();
         this.term?.focus?.();
@@ -1539,10 +1541,8 @@ export class PtyApp extends LitElement {
   }
 
   async startSession() {
-    if (!this.host || !this.user) {
-      alert("Please fill in Host and Username");
-      return;
-    }
+    if (!this.host) this.host = '127.0.0.1';
+    if (!this.user) this.user = 'termux';
 
     await this.savePrefs();
     await del('ssh_active_session');
@@ -1550,19 +1550,20 @@ export class PtyApp extends LitElement {
     if (this.ws) this.ws.close();
     if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
 
-    this.setView('terminal');
+    this.activeTab = 'terminal';
+    this.isSidebarOpen = false;
 
     this.initWSConnection(() => {
       setTimeout(() => {
         this.triggerManualResize();
         this.ws?.send(JSON.stringify({
           type: 'init',
-          host: this.host,
-          port: this.port,
-          username: this.user,
-          password: this.pass,
-          rows: this.term.rows,
-          cols: this.term.cols
+          host: this.host || '127.0.0.1',
+          port: this.port || '8022',
+          username: this.user || 'termux',
+          password: this.pass || '',
+          rows: this.term?.rows || 24,
+          cols: this.term?.cols || 80
         }));
       }, 100);
     });

@@ -75,13 +75,23 @@ export function resolveTerminalIntent(userText) {
   const text = userText.trim();
   const lower = text.toLowerCase();
 
-  // Direct tool prefix or direct bash commands
-  const toolExecMatch = text.match(/^(?:run|exec|terminal_exec|cmd)[:\s]+(.+)$/i);
+  // Direct tool prefix or direct bash commands (e.g. run: ls, exec: df -h, cmd: pkg update)
+  const toolExecMatch = text.match(/^(?:run|exec|terminal_exec|cmd|execute)[:\s]+(.+)$/i);
   if (toolExecMatch) {
-    return { command: toolExecMatch[1].trim(), isBengali: false };
+    return { command: toolExecMatch[1].trim(), isBengali: false, action: 'raw_command' };
   }
 
   const isBengali = /[\u0980-\u09FF]/.test(text);
+
+  // Bengali command wrapper phrases (e.g., "টার্মিনালে কমান্ড রান করো ls -la", "কমান্ড চালাও pkg update", "রান করো df -h")
+  const bnExecMatch = text.match(/(?:টার্মিনালে\s+)?(?:কমান্ড\s+)?(?:রান\s+করো|চালাও|চালিয়ে\s+দাও|এক্সিকিউট\s+করো|run\s+করো)[:\s]+(.+)$/i) ||
+                      text.match(/(?:রান|run|exec)\s+(?:করো\s+)?([a-zA-Z0-9_\-\.\s\/]+)/i);
+  if (bnExecMatch && bnExecMatch[1]) {
+    const raw = bnExecMatch[1].trim();
+    if (raw && !['system', 'প্যাকেজ'].includes(raw.toLowerCase())) {
+      return { command: raw, isBengali, action: 'raw_command' };
+    }
+  }
 
   // System Update / Upgrade (Bengali & English)
   if (
@@ -124,7 +134,7 @@ export function resolveTerminalIntent(userText) {
   }
 
   // List Files
-  if (lower.includes('ফাইল তালিকা') || lower.includes('ফাইল দেখো') || lower.includes('ডিরেক্টরি ফাইল') || lower.includes('list files') || lower.includes('show files') || lower === 'ls') {
+  if (lower.includes('ফাইল তালিকা') || lower.includes('ফাইল দেখো') || lower.includes('ডিরেক্টরি ফাইল') || lower.includes('ফাইল দেখাও') || lower.includes('list files') || lower.includes('show files') || lower === 'ls' || lower === 'dir') {
     return { command: 'ls -la', isBengali, action: 'list_files' };
   }
 
@@ -150,8 +160,8 @@ export function resolveTerminalIntent(userText) {
   }
 
   // Raw Linux Command Detection (e.g. user typed apt, git, npm, curl, mkdir, etc.)
-  const rawCmdPrefixes = ['apt ', 'pkg ', 'git ', 'npm ', 'curl ', 'wget ', 'mkdir ', 'cat ', 'grep ', 'rm ', 'python ', 'python3 ', 'node ', 'sh ', 'bash ', 'chmod ', 'chown ', 'tar ', 'zip ', 'unzip '];
-  if (rawCmdPrefixes.some(prefix => lower.startsWith(prefix))) {
+  const rawCmdPrefixes = ['apt ', 'pkg ', 'git ', 'npm ', 'curl ', 'wget ', 'mkdir ', 'cat ', 'grep ', 'rm ', 'python ', 'python3 ', 'node ', 'sh ', 'bash ', 'chmod ', 'chown ', 'tar ', 'zip ', 'unzip ', 'uname', 'whoami', 'uptime'];
+  if (rawCmdPrefixes.some(prefix => lower.startsWith(prefix) || lower === prefix.trim())) {
     return { command: text, isBengali, action: 'raw_command' };
   }
 

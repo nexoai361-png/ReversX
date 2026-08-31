@@ -168,14 +168,21 @@ export class ReversXPanel extends LitElement {
   }
 
   private checkBackendHealth() {
-    // Try PRoot-Ubuntu / Termux backend port 3001 or primary server endpoint
-    fetch('http://127.0.0.1:3001/status')
+    // Try primary server endpoints first, then fallback ports
+    fetch('/api/status')
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (data) {
           this.isBackendOnline = true;
         } else {
-          return fetch('/api/status').then(r => r.ok);
+          return fetch('/status').then(r => r.ok ? r.json() : null);
+        }
+      })
+      .then(data => {
+        if (data) {
+          this.isBackendOnline = true;
+        } else {
+          return fetch('http://127.0.0.1:3000/status').then(r => r.ok);
         }
       })
       .then(online => {
@@ -184,7 +191,11 @@ export class ReversXPanel extends LitElement {
         }
       })
       .catch(() => {
-        this.isBackendOnline = false;
+        // Final fallback try 3001
+        fetch('http://127.0.0.1:3001/status')
+          .then(r => r.ok)
+          .then(ok => { this.isBackendOnline = !!ok; })
+          .catch(() => { this.isBackendOnline = false; });
       });
   }
 
@@ -491,10 +502,12 @@ export class ReversXPanel extends LitElement {
     });
 
     const endpoints = [
-      'http://127.0.0.1:3001/api/chat/stream',
-      'http://127.0.0.1:3001/api/chat',
       '/api/chat/stream',
-      '/api/chat'
+      '/api/chat',
+      'http://127.0.0.1:3000/api/chat/stream',
+      'http://127.0.0.1:3000/api/chat',
+      'http://127.0.0.1:3001/api/chat/stream',
+      'http://127.0.0.1:3001/api/chat'
     ];
 
     for (const url of endpoints) {
@@ -585,7 +598,7 @@ export class ReversXPanel extends LitElement {
     });
 
     try {
-      const res = await fetch('http://127.0.0.1:3001/api/chat', {
+      const res = await fetch('/api/chat', {
         method: 'POST',
         headers: requestHeaders,
         body: requestBody
@@ -597,11 +610,27 @@ export class ReversXPanel extends LitElement {
         }
       }
     } catch (e) {
-      // Fallback to Express backend route
+      // Fallback to local host endpoints
     }
 
     try {
-      const res = await fetch('/api/chat', {
+      const res = await fetch('http://127.0.0.1:3000/api/chat', {
+        method: 'POST',
+        headers: requestHeaders,
+        body: requestBody
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.response) {
+          return { text: data.response };
+        }
+      }
+    } catch (e) {
+      // Fallback to 3001
+    }
+
+    try {
+      const res = await fetch('http://127.0.0.1:3001/api/chat', {
         method: 'POST',
         headers: requestHeaders,
         body: requestBody
@@ -617,7 +646,7 @@ export class ReversXPanel extends LitElement {
       }
     } catch (err: any) {
       return {
-        text: `[Server Offline]: Unable to connect to AI server backend at http://127.0.0.1:3001 or /api/chat. Please ensure ai_backend.js or server.js is running.`
+        text: `[Server Offline]: Unable to connect to AI server backend. Please ensure server.js is running on port 3000.`
       };
     }
 
