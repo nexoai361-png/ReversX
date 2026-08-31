@@ -1,6 +1,7 @@
 import { LitElement, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { runLangGraphAgent } from '../services/langgraph-agent';
+import { unsafeHTML } from 'lit/directives/unsafe-html.js';
+import { codeToHtml } from 'shiki';
 
 export interface ChatMessage {
   id: string;
@@ -9,6 +10,8 @@ export interface ChatMessage {
   agentName?: string;
   codeSnippet?: string;
   timestamp?: string;
+  isThinking?: boolean;
+  isStreaming?: boolean;
 }
 
 const KNOWN_AGENTS = [
@@ -89,10 +92,20 @@ export class ReversXPanel extends LitElement {
   }
 
   private checkBackendHealth() {
+    // Try PRoot-Ubuntu / Termux backend port 3001 or primary server endpoint
     fetch('http://127.0.0.1:3001/status')
       .then(r => r.ok ? r.json() : null)
       .then(data => {
-        this.isBackendOnline = !!data;
+        if (data) {
+          this.isBackendOnline = true;
+        } else {
+          return fetch('/api/status').then(r => r.ok);
+        }
+      })
+      .then(online => {
+        if (typeof online === 'boolean') {
+          this.isBackendOnline = online;
+        }
       })
       .catch(() => {
         this.isBackendOnline = false;
@@ -290,73 +303,206 @@ export class ReversXPanel extends LitElement {
 
     this.isGenerating = true;
 
+    const aiMsgId = (Date.now() + 1).toString();
+    const aiMsg: ChatMessage = {
+      id: aiMsgId,
+      sender: 'ai',
+      text: '',
+      isThinking: true,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+    this.messages = [...this.messages, aiMsg];
+    this.scrollToBottom();
+
     try {
-      const result = await this.sendAiRequest(text);
-      const aiMsg: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        sender: 'ai',
-        text: result.text,
-        codeSnippet: result.codeSnippet,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-      this.messages = [...this.messages, aiMsg];
+      await this.sendAiRequestStream(text, (chunkText) => {
+        const msgIdx = this.messages.findIndex(m => m.id === aiMsgId);
+        if (msgIdx !== -1) {
+          const updatedMsg = { ...this.messages[msgIdx] };
+          updatedMsg.isThinking = false;
+          updatedMsg.isStreaming = true;
+          updatedMsg.text += chunkText;
+          const newMessages = [...this.messages];
+          newMessages[msgIdx] = updatedMsg;
+          this.messages = newMessages;
+          this.scrollToBottom();
+        }
+      });
     } catch (err) {
-      const aiMsg: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        sender: 'ai',
-        text: "I received your request. How else can I assist you today?",
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-      this.messages = [...this.messages, aiMsg];
+      const msgIdx = this.messages.findIndex(m => m.id === aiMsgId);
+      if (msgIdx !== -1) {
+        const newMessages = [...this.messages];
+        newMessages[msgIdx] = {
+          ...newMessages[msgIdx],
+          isThinking: false,
+          isStreaming: false,
+          text: newMessages[msgIdx].text || "I received your request. How else can I assist you today?"
+        };
+        this.messages = newMessages;
+      }
     } finally {
+      const msgIdx = this.messages.findIndex(m => m.id === aiMsgId);
+      if (msgIdx !== -1) {
+        const newMessages = [...this.messages];
+        newMessages[msgIdx] = {
+          ...newMessages[msgIdx],
+          isThinking: false,
+          isStreaming: false
+        };
+        this.messages = newMessages;
+      }
       this.isGenerating = false;
       this.scrollToBottom();
     }
   }
 
-  private async sendAiRequest(text: string): Promise<{ text: string; codeSnippet?: string }> {
-    // 1. Check if backend Node.js server with LangGraph endpoint is reachable
-    if (this.isBackendOnline) {
+  private async sendAiRequestStream(
+    text: string,
+    onChunk: (chunk: string) => void
+  ): Promise<{ text: string; codeSnippet?: string }> {
+    const requestHeaders = {
+      'Content-Type': 'application/json',
+      'x-byok-provider': this.byokProvider,
+      'x-byok-key': this.byokApiKey,
+      'x-byok-model': this.byokModel
+    };
+
+    const requestBody = JSON.stringify({
+      message: text,
+      provider: this.byokProvider,
+      apiKey: this.byokApiKey,
+      model: this.byokModel,
+      stream: true
+    });
+
+    const endpoints = [
+      'http://127.0.0.1:3001/api/chat/stream',
+      'http://127.0.0.1:3001/api/chat',
+      '/api/chat/stream',
+      '/api/chat'
+    ];
+
+    for (const url of endpoints) {
       try {
-        const res = await fetch('http://127.0.0.1:3001/api/chat', {
+        const res = await fetch(url, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-byok-provider': this.byokProvider,
-            'x-byok-key': this.byokApiKey,
-            'x-byok-model': this.byokModel
-          },
-          body: JSON.stringify({ message: text, provider: this.byokProvider, apiKey: this.byokApiKey, model: this.byokModel })
+          headers: requestHeaders,
+          body: requestBody
         });
-        if (res.ok) {
+
+        if (!res.ok) continue;
+
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('text/event-stream') && res.body) {
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder('utf-8');
+          let fullText = '';
+          let buffer = '';
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (trimmed.startsWith('data: ')) {
+                const dataStr = trimmed.slice(6).trim();
+                if (dataStr === '[DONE]') continue;
+                try {
+                  const parsed = JSON.parse(dataStr);
+                  if (parsed.content) {
+                    fullText += parsed.content;
+                    onChunk(parsed.content);
+                  }
+                } catch (e) {
+                  // Ignore partial JSON line errors
+                }
+              }
+            }
+          }
+
+          if (fullText) {
+            return { text: fullText };
+          }
+        } else {
           const data = await res.json();
           if (data && data.response) {
-            return { text: data.response };
+            onChunk(data.response);
+            return { text: data.response, codeSnippet: data.codeSnippet };
           }
         }
       } catch (e) {
-        // Fallthrough to client-side LangGraph pipeline
+        // Try next fallback endpoint
       }
     }
 
-    // 2. Execute Client-side LangGraph StateGraph workflow
-    try {
-      const graphResult = await runLangGraphAgent({
-        query: text,
-        provider: this.byokProvider,
-        apiKey: this.byokApiKey,
-        model: this.byokModel
-      });
+    // Direct fallback response if offline or endpoints failed
+    const offlineResult = await this.sendAiRequest(text);
+    if (offlineResult.text) {
+      onChunk(offlineResult.text);
+    }
+    return offlineResult;
+  }
 
+  private async sendAiRequest(text: string): Promise<{ text: string; codeSnippet?: string }> {
+    const requestHeaders = {
+      'Content-Type': 'application/json',
+      'x-byok-provider': this.byokProvider,
+      'x-byok-key': this.byokApiKey,
+      'x-byok-model': this.byokModel
+    };
+
+    const requestBody = JSON.stringify({
+      message: text,
+      provider: this.byokProvider,
+      apiKey: this.byokApiKey,
+      model: this.byokModel
+    });
+
+    try {
+      const res = await fetch('http://127.0.0.1:3001/api/chat', {
+        method: 'POST',
+        headers: requestHeaders,
+        body: requestBody
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.response) {
+          return { text: data.response };
+        }
+      }
+    } catch (e) {
+      // Fallback to Express backend route
+    }
+
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: requestHeaders,
+        body: requestBody
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.response) {
+          return { text: data.response };
+        }
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        return { text: errData.error || `[Server Error ${res.status}]: Server processing failed.` };
+      }
+    } catch (err: any) {
       return {
-        text: graphResult.text,
-        codeSnippet: graphResult.codeSnippet
-      };
-    } catch (err) {
-      return {
-        text: "I have processed your message through the LangGraph agent pipeline. How else can I assist you today?"
+        text: `[Server Offline]: Unable to connect to AI server backend at http://127.0.0.1:3001 or /api/chat. Please ensure ai_backend.js or server.js is running.`
       };
     }
+
+    return {
+      text: "Server returned empty response. Please check your AI Backend configuration or BYOK settings."
+    };
   }
 
   private appendUserMessage(text: string) {
@@ -451,6 +597,15 @@ export class ReversXPanel extends LitElement {
     }
 
     return html`<div>${messageContent}</div>`;
+  }
+
+  private runCommandInTerminal(command: string) {
+    const userPermission = confirm(`Do you want to run this command directly in the PTY Terminal?\n\nCommand:\n${command}`);
+    if (userPermission) {
+      window.dispatchEvent(new CustomEvent('run-pty-command', {
+        detail: { command }
+      }));
+    }
   }
 
   private copyToClipboard(text: string, id: string) {
@@ -571,6 +726,63 @@ export class ReversXPanel extends LitElement {
       return html`<span class="json-null">${valStr}</span>`;
     }
     return html`<span class="json-punct">${valStr}</span>`;
+  }
+
+  private shikiCache = new Map<string, string>();
+  private shikiPending = new Set<string>();
+
+  private normalizeLanguage(lang: string | undefined): string {
+    if (!lang) return 'bash';
+    const l = lang.toLowerCase().trim();
+    const langMap: Record<string, string> = {
+      'js': 'javascript',
+      'ts': 'typescript',
+      'sh': 'bash',
+      'zsh': 'bash',
+      'cmd': 'bash',
+      'command': 'bash',
+      'terminal': 'bash',
+      'code': 'bash',
+      'py': 'python',
+      'yml': 'yaml',
+      'docker': 'dockerfile'
+    };
+    return langMap[l] || l;
+  }
+
+  private renderShikiCode(code: string, lang: string) {
+    const normLang = this.normalizeLanguage(lang);
+    const cacheKey = `${normLang}:${code}`;
+
+    if (this.shikiCache.has(cacheKey)) {
+      const htmlStr = this.shikiCache.get(cacheKey)!;
+      return html`<div class="shiki-code-container">${unsafeHTML(htmlStr)}</div>`;
+    }
+
+    if (!this.shikiPending.has(cacheKey)) {
+      this.shikiPending.add(cacheKey);
+      codeToHtml(code, {
+        lang: normLang,
+        theme: 'vitesse-dark'
+      }).then(htmlStr => {
+        this.shikiCache.set(cacheKey, htmlStr);
+        this.shikiPending.delete(cacheKey);
+        this.requestUpdate();
+      }).catch(() => {
+        codeToHtml(code, {
+          lang: 'txt',
+          theme: 'vitesse-dark'
+        }).then(htmlStr => {
+          this.shikiCache.set(cacheKey, htmlStr);
+          this.shikiPending.delete(cacheKey);
+          this.requestUpdate();
+        }).catch(() => {
+          this.shikiPending.delete(cacheKey);
+        });
+      });
+    }
+
+    return this.renderColorizedCode(code);
   }
 
   private renderColorizedJson(jsonObj: any) {
@@ -702,13 +914,30 @@ export class ReversXPanel extends LitElement {
   }
 
   private renderAiContent(msg: ChatMessage) {
+    if (msg.isThinking) {
+      return html`
+        <div class="ai-thinking-card">
+          <div class="thinking-spinner">
+            <span class="thinking-brain">🧠</span>
+            <span class="thinking-pulse"></span>
+          </div>
+          <span class="thinking-label">Generating answers... thinking...</span>
+          <div class="thinking-dots">
+            <span></span><span></span><span></span>
+          </div>
+        </div>
+      `;
+    }
+
     const segments = this.parseAiSegments(msg.text, msg.codeSnippet);
     const fullTextToCopy = (msg.text || '') + (msg.codeSnippet ? `\n\n${msg.codeSnippet}` : '');
+    const hasCodeOrCommands = segments.some(seg => seg.type === 'code' || seg.type === 'json');
 
     return html`
       <div class="ai-response-body">
-        ${segments.length === 0 ? html`<p class="ai-paragraph">${msg.text}</p>` : ''}
+        ${segments.length === 0 ? html`<p class="ai-paragraph">${msg.text}${msg.isStreaming ? html`<span class="streaming-cursor"></span>` : ''}</p>` : ''}
         ${segments.map((seg, idx) => {
+          const isLastSeg = idx === segments.length - 1;
           const segId = `${msg.id}-seg-${idx}`;
           if (seg.type === 'json') {
             const mode = this.jsonViewModes[segId] || 'pretty';
@@ -737,8 +966,8 @@ export class ReversXPanel extends LitElement {
                 </div>
                 <div class="ai-card-body">
                   ${mode === 'pretty'
-                    ? this.renderColorizedJson(seg.parsedJson)
-                    : html`<pre class="raw-code-block"><code>${seg.content}</code></pre>`
+                    ? this.renderShikiCode(JSON.stringify(seg.parsedJson, null, 2), 'json')
+                    : this.renderShikiCode(seg.content, 'json')
                   }
                 </div>
               </div>
@@ -751,18 +980,25 @@ export class ReversXPanel extends LitElement {
               <div class="ai-code-card">
                 <div class="ai-card-header">
                   <div class="header-left">
-                    <span class="code-icon">&lt;/&gt;</span>
                     <span class="card-title">${(seg.lang || 'CODE').toUpperCase()}</span>
                   </div>
-                  <button
-                    class="card-btn-copy ${isCopied ? 'copied' : ''}"
-                    @click="${() => this.copyToClipboard(seg.content, segId)}"
-                  >
-                    ${isCopied ? '✓ Copied' : 'Copy Code'}
-                  </button>
+                  <div class="header-actions">
+                    <button
+                      class="card-btn-run"
+                      @click="${() => this.runCommandInTerminal(seg.content)}"
+                    >
+                      ▶ Run in Terminal
+                    </button>
+                    <button
+                      class="card-btn-copy ${isCopied ? 'copied' : ''}"
+                      @click="${() => this.copyToClipboard(seg.content, segId)}"
+                    >
+                      ${isCopied ? '✓ Copied' : 'Copy Code'}
+                    </button>
+                  </div>
                 </div>
                 <div class="ai-card-body">
-                  ${this.renderColorizedCode(seg.content)}
+                  ${this.renderShikiCode(seg.content, seg.lang || 'bash')}
                 </div>
               </div>
             `;
@@ -771,23 +1007,28 @@ export class ReversXPanel extends LitElement {
           return html`
             <div class="ai-text-segment">
               ${this.renderFormattedText(seg.content)}
+              ${isLastSeg && msg.isStreaming ? html`<span class="streaming-cursor"></span>` : ''}
             </div>
           `;
         })}
 
-        <div class="ai-msg-footer">
-          <button
-            class="copy-msg-btn ${this.copiedBlockId === msg.id ? 'copied' : ''}"
-            @click="${() => this.copyToClipboard(fullTextToCopy, msg.id)}"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
-            <span>${this.copiedBlockId === msg.id ? 'Copied' : 'Copy Response'}</span>
-          </button>
-          ${msg.timestamp ? html`<span class="msg-time">${msg.timestamp}</span>` : ''}
-        </div>
+        ${!msg.isStreaming ? html`
+          <div class="ai-msg-footer">
+            ${!hasCodeOrCommands ? html`
+              <button
+                class="copy-msg-btn ${this.copiedBlockId === msg.id ? 'copied' : ''}"
+                @click="${() => this.copyToClipboard(fullTextToCopy, msg.id)}"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                </svg>
+                <span>${this.copiedBlockId === msg.id ? 'Copied' : 'Copy Response'}</span>
+              </button>
+            ` : ''}
+            ${msg.timestamp ? html`<span class="msg-time">${msg.timestamp}</span>` : ''}
+          </div>
+        ` : ''}
       </div>
     `;
   }

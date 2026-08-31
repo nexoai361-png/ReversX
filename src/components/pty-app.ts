@@ -357,6 +357,19 @@ export class PtyApp extends LitElement {
     window.addEventListener('resize', this.onWindowResize);
     window.addEventListener('click', this.onWindowClick);
     window.addEventListener('keydown', this.handleKeyDown);
+    window.addEventListener('run-pty-command', (e: Event) => {
+      const customEvent = e as CustomEvent<{ command: string }>;
+      if (customEvent.detail && customEvent.detail.command) {
+        let cmd = customEvent.detail.command;
+        if (!cmd.endsWith('\n') && !cmd.endsWith('\r')) {
+          cmd += '\r';
+        }
+        this.setView('terminal');
+        if (this.ws?.readyState === 1) {
+          this.ws.send(JSON.stringify({ type: 'input', data: cmd }));
+        }
+      }
+    });
   }
 
   disconnectedCallback() {

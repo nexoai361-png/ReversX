@@ -1,10 +1,118 @@
 import express from 'express';
 import { StateGraph, Annotation, START, END } from '@langchain/langgraph';
-import { HumanMessage, AIMessage, SystemMessage } from '@langchain/core/messages';
+import { HumanMessage, AIMessage } from '@langchain/core/messages';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
 
 export const langgraphRouter = express.Router();
-langgraphRouter.use(express.json());
+langgraphRouter.use(express.json({ limit: '2mb' }));
+
+const FETCH_TIMEOUT_MS = 25000;
+
+const logger = {
+  info: (msg, ...meta) => console.log(`[INF] [${new Date().toISOString()}] ${msg}`, ...meta),
+  warn: (msg, ...meta) => console.warn(`[WRN] [${new Date().toISOString()}] ${msg}`, ...meta),
+  error: (msg, ...meta) => console.error(`[ERR] [${new Date().toISOString()}] ${msg}`, ...meta),
+};
+
+// BYOK Provider Specifications Map
+const PROVIDER_CONFIGS = {
+  openrouter: {
+    endpoint: () => 'https://openrouter.ai/api/v1/chat/completions',
+    buildHeaders: (key) => ({ 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' }),
+    buildBody: (model, prompt) => ({
+      model: model || 'openai/gpt-3.5-turbo',
+      messages: [
+        { role: 'system', content: 'You are ReversX AI optimized for Proot-Ubuntu and Termux terminal tasks.' },
+        { role: 'user', content: prompt }
+      ]
+    }),
+    parseResponse: (data) => data.choices?.[0]?.message?.content || ''
+  },
+  sambanova: {
+    endpoint: () => 'https://api.sambanova.ai/v1/chat/completions',
+    buildHeaders: (key) => ({ 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' }),
+    buildBody: (model, prompt) => ({
+      model: model || 'Meta-Llama-3.1-8B-Instruct',
+      messages: [
+        { role: 'system', content: 'You are ReversX AI optimized for Proot-Ubuntu and Termux terminal tasks.' },
+        { role: 'user', content: prompt }
+      ]
+    }),
+    parseResponse: (data) => data.choices?.[0]?.message?.content || ''
+  },
+  google: {
+    endpoint: (model, key) => `https://generativelanguage.googleapis.com/v1beta/models/${model || 'gemini-1.5-flash'}:generateContent?key=${key}`,
+    buildHeaders: () => ({ 'Content-Type': 'application/json' }),
+    buildBody: (model, prompt) => ({
+      contents: [{ parts: [{ text: `System: You are ReversX AI for Proot-Ubuntu and Termux.\n\nUser Query: ${prompt}` }] }]
+    }),
+    parseResponse: (data) => data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+  },
+  cerebras: {
+    endpoint: () => 'https://api.cerebras.ai/v1/chat/completions',
+    buildHeaders: (key) => ({ 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' }),
+    buildBody: (model, prompt) => ({
+      model: model || 'llama3.1-8b',
+      messages: [
+        { role: 'system', content: 'You are ReversX AI optimized for Proot-Ubuntu and Termux.' },
+        { role: 'user', content: prompt }
+      ]
+    }),
+    parseResponse: (data) => data.choices?.[0]?.message?.content || ''
+  },
+  groq: {
+    endpoint: () => 'https://api.groq.com/openai/v1/chat/completions',
+    buildHeaders: (key) => ({ 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' }),
+    buildBody: (model, prompt) => ({
+      model: model || 'llama-3.3-70b-versatile',
+      messages: [
+        { role: 'system', content: 'You are ReversX AI optimized for Proot-Ubuntu and Termux.' },
+        { role: 'user', content: prompt }
+      ]
+    }),
+    parseResponse: (data) => data.choices?.[0]?.message?.content || ''
+  }
+};
+
+/**
+ * Execute BYOK Provider API Request safely with timeout signal
+ */
+async function fetchProviderResponse(provider, apiKey, model, message) {
+  const config = PROVIDER_CONFIGS[provider] || PROVIDER_CONFIGS.openrouter;
+  const endpoint = config.endpoint(model, apiKey);
+  const headers = config.buildHeaders(apiKey);
+  const body = JSON.stringify(config.buildBody(model, message));
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body,
+      signal: controller.signal
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      logger.warn(`Provider [${provider}] HTTP ${res.status}: ${errText.slice(0, 150)}`);
+      return '';
+    }
+
+    const data = await res.json();
+    return config.parseResponse(data);
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      logger.error(`Provider [${provider}] request timed out after ${FETCH_TIMEOUT_MS}ms`);
+    } else {
+      logger.error(`Provider [${provider}] fetch error: ${err.message}`);
+    }
+    return '';
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 /**
  * LANGGRAPH & LANGCHAIN AGENT STATE ANNOTATION
@@ -53,80 +161,14 @@ async function executionNode(state) {
   let replyText = '';
   let codeSnippet = undefined;
 
-  // Build LangChain System Prompt Template
-  const promptTemplate = ChatPromptTemplate.fromMessages([
+  // Build LangChain System Prompt Template reference
+  ChatPromptTemplate.fromMessages([
     ['system', 'You are ReversX AI - an advanced terminal and coding assistant optimized for Proot-Ubuntu, Termux, and Linux environments. Provide actionable, concise, and safe terminal commands.'],
     ['human', '{input}']
   ]);
 
   if (apiKey) {
-    try {
-      let endpoint = '';
-      let headers = { 'Content-Type': 'application/json' };
-      let payload = {};
-
-      if (provider === 'openrouter') {
-        endpoint = 'https://openrouter.ai/api/v1/chat/completions';
-        headers['Authorization'] = `Bearer ${apiKey}`;
-        payload = {
-          model: model || 'openai/gpt-3.5-turbo',
-          messages: [
-            { role: 'system', content: 'You are ReversX AI optimized for Proot-Ubuntu and Termux terminal tasks.' },
-            { role: 'user', content: message }
-          ]
-        };
-      } else if (provider === 'sambanova') {
-        endpoint = 'https://api.sambanova.ai/v1/chat/completions';
-        headers['Authorization'] = `Bearer ${apiKey}`;
-        payload = {
-          model: model || 'Meta-Llama-3.1-8B-Instruct',
-          messages: [
-            { role: 'system', content: 'You are ReversX AI optimized for Proot-Ubuntu and Termux terminal tasks.' },
-            { role: 'user', content: message }
-          ]
-        };
-      } else if (provider === 'google') {
-        const m = model || 'gemini-1.5-flash';
-        endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`;
-        payload = {
-          contents: [{ parts: [{ text: `System: You are ReversX AI for Proot-Ubuntu and Termux.\n\nUser Query: ${message}` }] }]
-        };
-      } else if (provider === 'cerebras') {
-        endpoint = 'https://api.cerebras.ai/v1/chat/completions';
-        headers['Authorization'] = `Bearer ${apiKey}`;
-        payload = {
-          model: model || 'llama3.1-8b',
-          messages: [
-            { role: 'system', content: 'You are ReversX AI optimized for Proot-Ubuntu and Termux.' },
-            { role: 'user', content: message }
-          ]
-        };
-      } else if (provider === 'groq') {
-        endpoint = 'https://api.groq.com/openai/v1/chat/completions';
-        headers['Authorization'] = `Bearer ${apiKey}`;
-        payload = {
-          model: model || 'llama-3.3-70b-versatile',
-          messages: [
-            { role: 'system', content: 'You are ReversX AI optimized for Proot-Ubuntu and Termux.' },
-            { role: 'user', content: message }
-          ]
-        };
-      }
-
-      if (endpoint) {
-        const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(payload) });
-        if (res.ok) {
-          const data = await res.json();
-          if (provider === 'google') {
-            replyText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-          } else {
-            replyText = data.choices?.[0]?.message?.content || '';
-          }
-        }
-      }
-    } catch (err) {
-      // Fallback below
-    }
+    replyText = await fetchProviderResponse(provider, apiKey, model, message);
   }
 
   // Native Proot-Ubuntu / Termux Agents using LangChain Message Objects
@@ -205,21 +247,77 @@ langgraphRouter.get('/status', (req, res) => {
 
 langgraphRouter.post('/chat', async (req, res) => {
   try {
-    const { message, provider, apiKey, model, agentName } = req.body || {};
+    const { message, provider, apiKey, model, agentName, stream } = req.body || {};
+    const reqProvider = provider || req.headers['x-byok-provider'] || 'openrouter';
+    const reqApiKey = apiKey || req.headers['x-byok-key'] || '';
+    const reqModel = model || req.headers['x-byok-model'] || '';
+    const reqStream = stream || req.headers['x-stream'] === 'true';
+
     const result = await graphWorkflow.invoke({
       message: message || '',
-      provider: provider || 'openrouter',
-      apiKey: apiKey || '',
-      model: model || '',
+      provider: reqProvider,
+      apiKey: reqApiKey,
+      model: reqModel,
       agentName: agentName || ''
     });
 
-    res.json({
-      response: result.response,
-      codeSnippet: result.codeSnippet,
-      steps: result.executionSteps
-    });
+    const fullResponse = result.response || '';
+
+    if (reqStream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      const chunks = fullResponse.match(/.{1,8}/g) || [fullResponse];
+      for (const chunk of chunks) {
+        res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      res.write('data: [DONE]\n\n');
+      res.end();
+    } else {
+      res.json({
+        response: fullResponse,
+        codeSnippet: result.codeSnippet,
+        steps: result.executionSteps
+      });
+    }
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    logger.error(`Error processing /chat: ${err.message}`);
+    res.status(500).json({ error: err.message || 'Internal AI Server Error' });
+  }
+});
+
+langgraphRouter.post('/chat/stream', async (req, res) => {
+  try {
+    const { message, provider, apiKey, model, agentName } = req.body || {};
+    const reqProvider = provider || req.headers['x-byok-provider'] || 'openrouter';
+    const reqApiKey = apiKey || req.headers['x-byok-key'] || '';
+    const reqModel = model || req.headers['x-byok-model'] || '';
+
+    const result = await graphWorkflow.invoke({
+      message: message || '',
+      provider: reqProvider,
+      apiKey: reqApiKey,
+      model: reqModel,
+      agentName: agentName || ''
+    });
+
+    const fullResponse = result.response || '';
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const chunks = fullResponse.match(/.{1,8}/g) || [fullResponse];
+    for (const chunk of chunks) {
+      res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    res.write('data: [DONE]\n\n');
+    res.end();
+  } catch (err) {
+    logger.error(`Error processing /chat/stream: ${err.message}`);
+    res.status(500).json({ error: err.message || 'Internal AI Server Error' });
   }
 });
