@@ -2,7 +2,7 @@ import express from 'express';
 import { StateGraph, Annotation, START, END } from '@langchain/langgraph';
 import { HumanMessage, AIMessage } from '@langchain/core/messages';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
-import { runTerminalExec, PTY_TERMINAL_TOOLS, executePtyTool } from './terminal-tools.js';
+import { runTerminalExec, PTY_TERMINAL_TOOLS, executePtyTool, resolveTerminalIntent, formatTerminalSummary } from './terminal-tools.js';
 
 export const langgraphRouter = express.Router();
 langgraphRouter.use(express.json({ limit: '2mb' }));
@@ -23,7 +23,7 @@ const PROVIDER_CONFIGS = {
     buildBody: (model, prompt) => ({
       model: model || 'openai/gpt-3.5-turbo',
       messages: [
-        { role: 'system', content: 'You are ReversX AI optimized for Proot-Ubuntu and Termux terminal tasks.' },
+        { role: 'system', content: 'You are ReversX AI, an autonomous terminal & coding assistant optimized for Proot-Ubuntu and Termux. Keep explanations clear and concise. If the user asks you to perform a terminal task, explain the outcome clearly.' },
         { role: 'user', content: prompt }
       ]
     }),
@@ -35,7 +35,7 @@ const PROVIDER_CONFIGS = {
     buildBody: (model, prompt) => ({
       model: model || 'Meta-Llama-3.1-8B-Instruct',
       messages: [
-        { role: 'system', content: 'You are ReversX AI optimized for Proot-Ubuntu and Termux terminal tasks.' },
+        { role: 'system', content: 'You are ReversX AI, an autonomous terminal & coding assistant optimized for Proot-Ubuntu and Termux.' },
         { role: 'user', content: prompt }
       ]
     }),
@@ -127,6 +127,7 @@ const AgentStateAnnotation = Annotation.Root({
   messages: Annotation({ value: (x, y) => x.concat(y), default: () => [] }),
   response: Annotation({ value: (x, y) => y ?? x, default: () => '' }),
   codeSnippet: Annotation({ value: (x, y) => y ?? x, default: () => undefined }),
+  runningCommand: Annotation({ value: (x, y) => y ?? x, default: () => undefined }),
   executionSteps: Annotation({ value: (x, y) => x.concat(y), default: () => [] })
 });
 
@@ -155,54 +156,42 @@ async function routerNode(state) {
 
 /**
  * NODE 2: LANGGRAPH EXECUTION ENGINE
- * Handles multi-provider BYOK streaming/REST calls or proot-ubuntu intelligent terminal agents.
+ * Handles autonomous Proot-Ubuntu terminal execution or BYOK LLM execution.
  */
 async function executionNode(state) {
   const { message, provider, apiKey, model, agentName } = state;
   let replyText = '';
   let codeSnippet = undefined;
+  let runningCommand = undefined;
 
-  // Build LangChain System Prompt Template reference
-  ChatPromptTemplate.fromMessages([
-    ['system', 'You are ReversX AI - an advanced terminal and coding assistant optimized for Proot-Ubuntu, Termux, and Linux environments. Provide actionable, concise, and safe terminal commands.'],
-    ['human', '{input}']
-  ]);
-
-  if (apiKey) {
+  // Step 1: Check for autonomous terminal command execution
+  const terminalIntent = resolveTerminalIntent(message);
+  if (terminalIntent) {
+    runningCommand = terminalIntent.command;
+    const toolRes = await runTerminalExec(terminalIntent.command);
+    replyText = formatTerminalSummary(terminalIntent, toolRes);
+  } else if (apiKey) {
     replyText = await fetchProviderResponse(provider, apiKey, model, message);
   }
 
-  // Native Proot-Ubuntu / Termux Agents using LangChain Message Objects
+  // Step 2: Fallback local autonomous responses
   if (!replyText) {
     const lower = message.toLowerCase();
-    
-    // Check if message is invoking a terminal tool or asking to run command
-    const toolExecMatch = message.match(/^run:\s*(.+)$/i) || message.match(/^(?:exec|run|cmd|terminal_exec)\s+(.+)$/i);
-    const cwdMatch = lower.includes('terminal_cwd') || lower.includes('current directory') || lower.includes('where am i');
-    
-    if (toolExecMatch) {
-      const cmdToRun = toolExecMatch[1].trim();
-      const toolRes = await runTerminalExec(cmdToRun);
-      replyText = `ReversX PTY Terminal Exec Result:\n\n\`\`\`bash\n${toolRes.terminal_output}\n\`\`\`\n\n- **CWD**: \`${toolRes.terminal_cwd}\`\n- **Exit Code**: \`${toolRes.terminal_exit_code}\` (${toolRes.success ? 'Success' : 'Failed'})\n- **Signal**: \`${toolRes.terminal_signal || 'None'}\`\n- **Timeout**: \`${toolRes.terminal_timeout}s\``;
-      codeSnippet = cmdToRun;
-    } else if (cwdMatch) {
-      const toolRes = await executePtyTool('terminal_cwd');
-      replyText = `ReversX PTY Terminal CWD:\n\`\`\`\n${toolRes.terminal_cwd}\n\`\`\``;
-    } else {
-      const isCoder = lower.includes('/coderagent') || lower.includes('code') || lower.includes('script') || lower.includes('ssh') || agentName === '/CoderAgent';
-      const isDebug = lower.includes('/debugagent') || lower.includes('debug') || lower.includes('error') || agentName === '/DebugAgent';
-      const isExplain = lower.includes('/explainagent') || lower.includes('explain') || agentName === '/ExplainAgent';
+    const isBengali = /[\u0980-\u09FF]/.test(message);
 
-      if (isCoder) {
-        replyText = 'ReversX LangGraph Coder Agent generated terminal script for Proot-Ubuntu:';
-        codeSnippet = `#!/data/data/com.termux/files/usr/bin/bash\n# Proot-Ubuntu & Termux Automation Script\npkg update && pkg upgrade -y\npkg install -y openssh proot-distro\nsshd -p 8022\necho "SSH Server Active on Port 8022!"`;
-      } else if (isDebug) {
-        replyText = 'ReversX LangGraph Debug Agent analyzed your system: All WebSocket PTY and SSH ports are healthy.';
-      } else if (isExplain) {
-        replyText = 'ReversX LangGraph / LangChain Engine: Multi-node state machine running in Proot-Ubuntu backend.';
-      } else {
-        replyText = 'Processed through LangGraph & LangChain dedicated backend agent. Ready for Proot-Ubuntu & Termux commands!';
-      }
+    if (lower.includes('/coderagent') || lower.includes('code') || lower.includes('script') || agentName === '/CoderAgent') {
+      replyText = isBengali
+        ? 'ReversX কোডার এজেন্ট Proot-Ubuntu এর জন্য টার্মিনাল স্ক্রিপ্ট প্রস্তুত করেছে:'
+        : 'ReversX Coder Agent generated terminal script for Proot-Ubuntu:';
+      codeSnippet = `#!/data/data/com.termux/files/usr/bin/bash\n# Proot-Ubuntu Automation Script\napt update && apt upgrade -y\napt install -y openssh-server\necho "Proot-Ubuntu System Ready!"`;
+    } else if (lower.includes('/debugagent') || lower.includes('debug') || lower.includes('error') || agentName === '/DebugAgent') {
+      replyText = isBengali
+        ? 'ReversX ডিবাগ এজেন্ট: সমস্ত PTY সকেট ও টার্মিনাল প্রসেস স্বাভাবিকভাবে চলছে।'
+        : 'ReversX Debug Agent: Terminal and PTY processes are healthy.';
+    } else {
+      replyText = isBengali
+        ? 'ReversX AI প্রস্তুত! টার্মিনালে কোনো কমান্ড চালাতে বা সাহায্য পেতে বলুন (যেমন: `সিস্টেম আপডেট করো`, `স্টোরেজ চেক করো`, `ls`, ইত্যাদি)।'
+        : 'ReversX AI is ready! Ask to run terminal commands or help with your Proot-Ubuntu environment.';
     }
   }
 
@@ -211,6 +200,7 @@ async function executionNode(state) {
   return {
     response: replyText,
     codeSnippet: codeSnippet,
+    runningCommand: runningCommand,
     messages: [aiMessage],
     executionSteps: ['langchain_execution']
   };
@@ -233,6 +223,7 @@ async function outputParserNode(state) {
   return {
     response: reply,
     codeSnippet: snippet,
+    runningCommand: state.runningCommand,
     executionSteps: ['langchain_output_parser']
   };
 }
@@ -315,6 +306,10 @@ langgraphRouter.post('/chat', async (req, res) => {
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
 
+      if (result.runningCommand) {
+        res.write(`data: ${JSON.stringify({ runningCommand: result.runningCommand })}\n\n`);
+      }
+
       const chunks = fullResponse.match(/.{1,8}/g) || [fullResponse];
       for (const chunk of chunks) {
         res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
@@ -326,6 +321,7 @@ langgraphRouter.post('/chat', async (req, res) => {
       res.json({
         response: fullResponse,
         codeSnippet: result.codeSnippet,
+        runningCommand: result.runningCommand,
         steps: result.executionSteps
       });
     }
@@ -356,6 +352,10 @@ langgraphRouter.post('/chat/stream', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
+    if (result.runningCommand) {
+      res.write(`data: ${JSON.stringify({ runningCommand: result.runningCommand })}\n\n`);
+    }
+
     const chunks = fullResponse.match(/.{1,8}/g) || [fullResponse];
     for (const chunk of chunks) {
       res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
@@ -368,3 +368,4 @@ langgraphRouter.post('/chat/stream', async (req, res) => {
     res.status(500).json({ error: err.message || 'Internal AI Server Error' });
   }
 });
+

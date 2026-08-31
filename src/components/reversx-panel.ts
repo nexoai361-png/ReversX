@@ -65,10 +65,10 @@ export class ReversXPanel extends LitElement {
 
   private handlePtyCommandEvent = (e: any) => {
     const cmd = e.detail?.command || 'PTY Command';
-    this.setActiveTool('terminal_exec', 'Executing command directly in PTY Terminal...', cmd);
+    this.setActiveTool('terminal_exec', 'Running Commands', cmd);
     setTimeout(() => {
-      this.markToolComplete('Finished PTY terminal execution');
-    }, 2500);
+      this.markToolComplete();
+    }, 1200);
   };
 
   private setActiveTool(toolName: string, status: string, command?: string, progress?: string) {
@@ -76,8 +76,8 @@ export class ReversXPanel extends LitElement {
     this.activeTool = {
       tool: toolName,
       status,
-      command,
-      progress: progress || 'PTY Execution Active...',
+      command: command || 'pkg update',
+      progress: progress || 'Running Commands',
       startTime: Date.now(),
       isComplete: false
     };
@@ -91,18 +91,17 @@ export class ReversXPanel extends LitElement {
     }, 100);
   }
 
-  private markToolComplete(statusMessage?: string) {
+  private markToolComplete() {
     if (this.activeTool) {
       this.activeTool = {
         ...this.activeTool,
-        isComplete: true,
-        status: statusMessage || 'Tool execution completed'
+        isComplete: true
       };
       this.clearToolTimer();
       this.requestUpdate();
       setTimeout(() => {
         this.dismissActiveTool();
-      }, 3500);
+      }, 300);
     }
   }
 
@@ -361,11 +360,42 @@ export class ReversXPanel extends LitElement {
   private handleKeyDown(e: KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      this.sendMessage();
+      this.handleSendMessage();
     }
   }
 
   private async sendMessage() {
+    await this.handleSendMessage();
+  }
+
+  private detectTerminalIntentCommand(text: string): string | null {
+    if (!text) return null;
+    const lower = text.trim().toLowerCase();
+    if (lower.includes('আপডেট') || lower.includes('update system') || lower.includes('system update') || lower === 'pkg update' || lower === 'apt update') {
+      return 'pkg update';
+    }
+    if (lower.includes('আপগ্রেড') || lower.includes('upgrade') || lower === 'pkg upgrade' || lower === 'apt upgrade') {
+      return 'pkg upgrade';
+    }
+    if (lower.includes('স্টোরেজ') || lower.includes('ডিস্ক') || lower.includes('storage') || lower.includes('disk')) {
+      return 'df -h';
+    }
+    if (lower.includes('র‍্যাম') || lower.includes('মেমোরি') || lower.includes('ram') || lower.includes('memory')) {
+      return 'free -m';
+    }
+    if (lower.includes('ফাইল') || lower.includes('list files') || lower === 'ls') {
+      return 'ls -la';
+    }
+    const cmdMatch = text.match(/^(?:run|exec|terminal_exec|cmd)[:\s]+(.+)$/i);
+    if (cmdMatch) return cmdMatch[1].trim();
+    const rawCmdPrefixes = ['apt ', 'pkg ', 'git ', 'npm ', 'curl ', 'wget ', 'mkdir ', 'cat ', 'grep ', 'rm ', 'python ', 'python3 ', 'node ', 'sh ', 'bash '];
+    if (rawCmdPrefixes.some(prefix => lower.startsWith(prefix))) {
+      return text.trim();
+    }
+    return null;
+  }
+
+  private async handleSendMessage() {
     const text = this.inputQuery.trim();
     if (!text || this.isGenerating) return;
 
@@ -377,32 +407,13 @@ export class ReversXPanel extends LitElement {
       userInput.style.height = 'auto';
     }
     this.isExpandVisible = false;
-
     this.isGenerating = true;
 
-    // Detect intent for tool indicator
-    const lowerText = text.toLowerCase();
-    let toolName = 'terminal_exec';
-    let statusText = 'Executing command in PTY...';
-
-    if (lowerText.includes('where am i') || lowerText.includes('current directory') || lowerText === 'pwd' || lowerText === 'terminal_cwd') {
-      toolName = 'terminal_cwd';
-      statusText = 'Querying working directory...';
-    } else if (lowerText.includes('timeout') || lowerText.includes('terminal_timeout')) {
-      toolName = 'terminal_timeout';
-      statusText = 'Configuring terminal execution timeout...';
-    } else if (lowerText.includes('exit code') || lowerText.includes('exit status') || lowerText.includes('terminal_exit_code')) {
-      toolName = 'terminal_exit_code';
-      statusText = 'Verifying command exit status...';
-    } else if (lowerText.includes('signal') || lowerText.includes('terminal_signal')) {
-      toolName = 'terminal_signal';
-      statusText = 'Checking process termination signal...';
-    } else if (lowerText.includes('output') || lowerText.includes('stdout') || lowerText.includes('terminal_output')) {
-      toolName = 'terminal_output';
-      statusText = 'Retrieving stdout and stderr output...';
+    // Detect if this action involves a terminal tool execution
+    const clientCmd = this.detectTerminalIntentCommand(text);
+    if (clientCmd) {
+      this.setActiveTool('terminal_exec', 'Running Commands', clientCmd);
     }
-
-    this.setActiveTool(toolName, statusText, text);
 
     const aiMsgId = (Date.now() + 1).toString();
     const aiMsg: ChatMessage = {
@@ -429,7 +440,7 @@ export class ReversXPanel extends LitElement {
           this.scrollToBottom();
         }
       });
-      this.markToolComplete('Execution finished successfully');
+      this.dismissActiveTool();
     } catch (err) {
       const msgIdx = this.messages.findIndex(m => m.id === aiMsgId);
       if (msgIdx !== -1) {
@@ -442,7 +453,7 @@ export class ReversXPanel extends LitElement {
         };
         this.messages = newMessages;
       }
-      this.markToolComplete('Execution ended');
+      this.dismissActiveTool();
     } finally {
       const msgIdx = this.messages.findIndex(m => m.id === aiMsgId);
       if (msgIdx !== -1) {
@@ -455,6 +466,7 @@ export class ReversXPanel extends LitElement {
         this.messages = newMessages;
       }
       this.isGenerating = false;
+      this.dismissActiveTool();
       this.scrollToBottom();
     }
   }
@@ -517,6 +529,9 @@ export class ReversXPanel extends LitElement {
                 if (dataStr === '[DONE]') continue;
                 try {
                   const parsed = JSON.parse(dataStr);
+                  if (parsed.runningCommand) {
+                    this.setActiveTool('terminal_exec', 'Running Commands', parsed.runningCommand);
+                  }
                   if (parsed.content) {
                     fullText += parsed.content;
                     onChunk(parsed.content);
@@ -534,6 +549,9 @@ export class ReversXPanel extends LitElement {
         } else {
           const data = await res.json();
           if (data && data.response) {
+            if (data.runningCommand) {
+              this.setActiveTool('terminal_exec', 'Running Commands', data.runningCommand);
+            }
             onChunk(data.response);
             return { text: data.response, codeSnippet: data.codeSnippet };
           }
@@ -1091,12 +1109,6 @@ export class ReversXPanel extends LitElement {
                   </div>
                   <div class="header-actions">
                     <button
-                      class="card-btn-run"
-                      @click="${() => this.runCommandInTerminal(seg.content)}"
-                    >
-                      ▶ Run in Terminal
-                    </button>
-                    <button
                       class="card-btn-copy ${isCopied ? 'copied' : ''}"
                       @click="${() => this.copyToClipboard(seg.content, segId)}"
                     >
@@ -1179,53 +1191,20 @@ export class ReversXPanel extends LitElement {
         <input type="file" id="reversx-image-input" accept="image/*" style="display:none;" @change="${this.handleImageChange}" />
         <input type="file" id="reversx-camera-input" accept="image/*" capture="environment" style="display:none;" @change="${this.handleCameraChange}" />
 
-        <!-- Cursor & VS Code Style Tool Active Overlay Indicator -->
-        ${this.activeTool ? html`
+        <!-- VS Code Minimal Tool Active Indicator -->
+        ${this.activeTool && !this.activeTool.isComplete ? html`
           <div class="tool-active-overlay" id="tool-active-overlay">
-            <div class="tool-active-card ${this.activeTool.isComplete ? 'completed-card' : ''}">
+            <div class="tool-active-card running">
               <div class="tool-active-top">
                 <div class="tool-badge-group">
-                  <div class="tool-spinner-wrap">
-                    ${this.activeTool.isComplete ? html`
-                      <svg class="tool-complete-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-                        <polyline points="20 6 9 17 4 12"></polyline>
-                      </svg>
-                    ` : html`
-                      <svg class="tool-spinner-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                        <circle cx="12" cy="12" r="10" stroke-opacity="0.2"></circle>
-                        <path d="M12 2 a10 10 0 0 1 10 10" stroke="#38bdf8" stroke-linecap="round"></path>
-                      </svg>
-                      <span class="tool-icon">⚡</span>
-                    `}
-                  </div>
-                  <span class="tool-title-badge">${this.activeTool.tool}</span>
-                  <span class="tool-status-pill ${this.activeTool.isComplete ? 'completed' : 'running'}">
-                    <span class="status-pulse-dot"></span>
-                    ${this.activeTool.isComplete ? 'COMPLETED' : 'EXECUTING'}
+                  <span class="tool-icon-spin"></span>
+                  <span class="tool-running-cmd-label">
+                    Running Commands: <strong class="tool-running-cmd-text">${this.activeTool.command || 'terminal execution'}</strong>
                   </span>
                 </div>
-
-                <div class="tool-timer-wrap">
-                  <span class="tool-elapsed-time">${this.getFormattedElapsed(this.activeTool.startTime)}s</span>
-                  <button class="tool-close-btn" @click="${this.dismissActiveTool}" title="Dismiss status">✕</button>
-                </div>
               </div>
-
-              <div class="tool-active-body">
-                ${this.activeTool.command ? html`
-                  <div class="tool-command-line">
-                    <span class="cmd-prompt">$</span>
-                    <span class="cmd-text">${this.activeTool.command}</span>
-                  </div>
-                ` : ''}
-                <div class="tool-progress-info">
-                  <span class="progress-label">${this.activeTool.status}</span>
-                  <span class="progress-sub">${this.activeTool.progress || 'PTY Process Active'}</span>
-                </div>
-              </div>
-
               <div class="tool-progress-bar-container">
-                <div class="tool-progress-shimmer ${this.activeTool.isComplete ? 'complete' : ''}"></div>
+                <div class="tool-progress-line"></div>
               </div>
             </div>
           </div>
