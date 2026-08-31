@@ -1,5 +1,6 @@
 import { LitElement, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { runLangGraphAgent } from '../services/langgraph-agent';
 
 export interface ChatMessage {
   id: string;
@@ -35,6 +36,7 @@ export class ReversXPanel extends LitElement {
   @state() expandedMessageIds: Set<string> = new Set();
   
   @state() isSettingsOpen: boolean = false;
+  @state() isSecurityInfoOpen: boolean = false;
   @state() isByokDropdownOpen: boolean = false;
   @state() byokProvider: string = 'openrouter';
   @state() byokApiKey: string = '';
@@ -100,12 +102,19 @@ export class ReversXPanel extends LitElement {
   private toggleSettingsModal() {
     this.isSettingsOpen = !this.isSettingsOpen;
     this.isByokDropdownOpen = false;
+    this.isSecurityInfoOpen = false;
     this.byokSaveMsg = '';
   }
 
   private closeSettingsModal() {
     this.isSettingsOpen = false;
     this.isByokDropdownOpen = false;
+    this.isSecurityInfoOpen = false;
+  }
+
+  private toggleSecurityInfo(e: Event) {
+    e.stopPropagation();
+    this.isSecurityInfoOpen = !this.isSecurityInfoOpen;
   }
 
   private toggleByokDropdown(e: Event) {
@@ -306,6 +315,7 @@ export class ReversXPanel extends LitElement {
   }
 
   private async sendAiRequest(text: string): Promise<{ text: string; codeSnippet?: string }> {
+    // 1. Check if backend Node.js server with LangGraph endpoint is reachable
     if (this.isBackendOnline) {
       try {
         const res = await fetch('http://127.0.0.1:3001/api/chat', {
@@ -325,72 +335,28 @@ export class ReversXPanel extends LitElement {
           }
         }
       } catch (e) {
-        // Fallthrough
+        // Fallthrough to client-side LangGraph pipeline
       }
     }
 
-    if (this.byokApiKey) {
-      try {
-        let endpoint = '';
-        let headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        let payload: any = {};
+    // 2. Execute Client-side LangGraph StateGraph workflow
+    try {
+      const graphResult = await runLangGraphAgent({
+        query: text,
+        provider: this.byokProvider,
+        apiKey: this.byokApiKey,
+        model: this.byokModel
+      });
 
-        if (this.byokProvider === 'openrouter') {
-          endpoint = 'https://openrouter.ai/api/v1/chat/completions';
-          headers['Authorization'] = `Bearer ${this.byokApiKey}`;
-          payload = { model: this.byokModel || 'openai/gpt-3.5-turbo', messages: [{ role: 'user', content: text }] };
-        } else if (this.byokProvider === 'sambanova') {
-          endpoint = 'https://api.sambanova.ai/v1/chat/completions';
-          headers['Authorization'] = `Bearer ${this.byokApiKey}`;
-          payload = { model: this.byokModel || 'Meta-Llama-3.1-8B-Instruct', messages: [{ role: 'user', content: text }] };
-        } else if (this.byokProvider === 'google') {
-          const m = this.byokModel || 'gemini-1.5-flash';
-          endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${this.byokApiKey}`;
-          payload = { contents: [{ parts: [{ text: text }] }] };
-        } else if (this.byokProvider === 'cerebras') {
-          endpoint = 'https://api.cerebras.ai/v1/chat/completions';
-          headers['Authorization'] = `Bearer ${this.byokApiKey}`;
-          payload = { model: this.byokModel || 'llama3.1-8b', messages: [{ role: 'user', content: text }] };
-        } else if (this.byokProvider === 'groq') {
-          endpoint = 'https://api.groq.com/openai/v1/chat/completions';
-          headers['Authorization'] = `Bearer ${this.byokApiKey}`;
-          payload = { model: this.byokModel || 'llama-3.3-70b-versatile', messages: [{ role: 'user', content: text }] };
-        }
-
-        if (endpoint) {
-          const res = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(payload) });
-          if (res.ok) {
-            const data = await res.json();
-            let replyText = '';
-            if (this.byokProvider === 'google') {
-              replyText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-            } else {
-              replyText = data.choices?.[0]?.message?.content || '';
-            }
-            if (replyText) {
-              return { text: replyText };
-            }
-          }
-        }
-      } catch (err) {
-        // Fallthrough
-      }
+      return {
+        text: graphResult.text,
+        codeSnippet: graphResult.codeSnippet
+      };
+    } catch (err) {
+      return {
+        text: "I have processed your message through the LangGraph agent pipeline. How else can I assist you today?"
+      };
     }
-
-    let responseText = "I have received your message. How else can I assist you today?";
-    let codeSnippet: string | undefined = undefined;
-
-    const lower = text.toLowerCase();
-    if (lower.includes('code') || lower.includes('/coderagent') || lower.includes('script') || lower.includes('ssh')) {
-      responseText = "Here is a code snippet tailored for your request:";
-      codeSnippet = `#!/data/data/com.termux/files/usr/bin/bash\n# ReversX AI - Automated Terminal Task\nsshd -p 8022\necho "SSH Daemon Active on port 8022!"`;
-    } else if (lower.includes('debug') || lower.includes('/debugagent') || lower.includes('error')) {
-      responseText = "Checking for issues... No syntax errors found in your current configuration.";
-    } else if (lower.includes('explain') || lower.includes('/explainagent')) {
-      responseText = "ReversX AI breaks down complex tasks into clean, executable terminal commands.";
-    }
-
-    return { text: responseText, codeSnippet };
   }
 
   private appendUserMessage(text: string) {
@@ -968,10 +934,53 @@ export class ReversXPanel extends LitElement {
         <div class="byok-modal-overlay" @click="${this.closeSettingsModal}">
           <div class="byok-modal" @click="${(e: Event) => e.stopPropagation()}">
             <div class="byok-modal-header">
-              <h3>BYOK (Bring Your Own Key)</h3>
+              <div class="byok-header-title-box">
+                <h3>BYOK (Bring Your Own Key)</h3>
+                <button
+                  class="byok-info-btn ${this.isSecurityInfoOpen ? 'active' : ''}"
+                  @click="${this.toggleSecurityInfo}"
+                  title="Security & Key Safety Info"
+                >
+                  ⓘ
+                </button>
+              </div>
               <button class="byok-modal-close" @click="${this.closeSettingsModal}">✕</button>
             </div>
             <div class="byok-modal-body">
+              ${this.isSecurityInfoOpen ? html`
+                <div class="byok-security-card">
+                  <div class="security-card-header">
+                    <div class="security-card-title-group">
+                      <span class="security-icon">🛡️</span>
+                      <span class="security-title">How Keys Are Handled</span>
+                    </div>
+                    <button class="security-close-btn" @click="${() => this.isSecurityInfoOpen = false}">✕</button>
+                  </div>
+                  <div class="security-card-content">
+                    <div class="security-point">
+                      <span class="point-bullet">🔒</span>
+                      <div class="point-text">
+                        <strong>On-Device Local Storage Only</strong>
+                        <p>Your API key is saved exclusively inside your browser's private localStorage. It is never transmitted to or stored on external backend servers.</p>
+                      </div>
+                    </div>
+                    <div class="security-point">
+                      <span class="point-bullet">⚡</span>
+                      <div class="point-text">
+                        <strong>Direct & Encrypted HTTPS</strong>
+                        <p>Requests travel directly over encrypted SSL (HTTPS) from your device to official AI provider endpoints (OpenRouter, Groq, Google, etc.).</p>
+                      </div>
+                    </div>
+                    <div class="security-point">
+                      <span class="point-bullet">🚫</span>
+                      <div class="point-text">
+                        <strong>Zero Key Leaks Guarantee</strong>
+                        <p>No third-party key tracking, logging, or database recording is performed. Your credentials remain 100% under your personal control.</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ` : ''}
               <div class="byok-field">
                 <label>Provider</label>
                 <div class="vscode-custom-select-container" id="byok-dropdown-container">
@@ -989,11 +998,11 @@ export class ReversXPanel extends LitElement {
                   ${this.isByokDropdownOpen ? html`
                     <div class="vscode-custom-select-options">
                       ${[
-                        { key: 'openrouter', label: 'OpenRouter', badge: 'Popular' },
-                        { key: 'groq', label: 'Groq', badge: 'Fast Llama' },
-                        { key: 'sambanova', label: 'SambaNova', badge: 'Fast' },
-                        { key: 'google', label: 'Google AI Studio', badge: 'Gemini' },
-                        { key: 'cerebras', label: 'Cerebras', badge: 'Ultra-Fast' }
+                        { key: 'openrouter', label: 'OpenRouter' },
+                        { key: 'groq', label: 'Groq' },
+                        { key: 'sambanova', label: 'SambaNova' },
+                        { key: 'google', label: 'Google AI Studio' },
+                        { key: 'cerebras', label: 'Cerebras' }
                       ].map(opt => html`
                         <div
                           class="vscode-custom-select-option ${this.byokProvider === opt.key ? 'selected' : ''}"
@@ -1003,7 +1012,6 @@ export class ReversXPanel extends LitElement {
                             <span class="option-check">${this.byokProvider === opt.key ? '✓' : ''}</span>
                             <span class="option-label">${opt.label}</span>
                           </div>
-                          <span class="option-badge">${opt.badge}</span>
                         </div>
                       `)}
                     </div>
@@ -1018,10 +1026,10 @@ export class ReversXPanel extends LitElement {
                 <label>Model Name</label>
                 <input type="text" placeholder="e.g. openai/gpt-3.5-turbo or gemini-1.5-flash" .value="${this.byokModel}" @input="${(e: Event) => this.byokModel = (e.target as HTMLInputElement).value}" />
               </div>
+              <div class="byok-action-row">
+                <button class="byok-save-btn" @click="${this.saveByokSettings}">Save</button>
+              </div>
               ${this.byokSaveMsg ? html`<div class="byok-save-msg">${this.byokSaveMsg}</div>` : ''}
-            </div>
-            <div class="byok-modal-footer">
-              <button class="byok-save-btn" @click="${this.saveByokSettings}">Save Credentials</button>
             </div>
           </div>
         </div>

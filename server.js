@@ -5,9 +5,26 @@ import { Client } from 'ssh2';
 import { StringDecoder } from 'node:string_decoder';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { langgraphRouter } from './src/server/langgraph-backend.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+app.use(express.json());
+
+// Enable CORS for API routes
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-byok-provider, x-byok-key, x-byok-model');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
+// Mount dedicated LangGraph & LangChain AI backend
+app.use('/api', langgraphRouter);
+
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
