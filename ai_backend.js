@@ -1,6 +1,7 @@
 import express from 'express';
 import http from 'http';
 import { StateGraph, END, START } from '@langchain/langgraph';
+import { runTerminalExec, PTY_TERMINAL_TOOLS, executePtyTool } from './src/server/terminal-tools.js';
 
 // Configuration
 const PORT = process.env.AI_PORT || process.env.PORT || 3001;
@@ -205,6 +206,37 @@ app.get('/status', (req, res) => {
     online: true,
     provider: 'ReversX Local Backend'
   });
+});
+
+// PTY Terminal Tools Endpoints
+app.get('/api/terminal/tools', (req, res) => {
+  res.json({ tools: PTY_TERMINAL_TOOLS });
+});
+
+app.post('/api/terminal/tools/call', async (req, res) => {
+  try {
+    const { tool, arguments: args } = req.body || {};
+    if (!tool) {
+      return res.status(400).json({ error: 'Missing "tool" field' });
+    }
+    const result = await executePtyTool(tool, args || {});
+    res.json({ success: true, tool, result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/terminal/exec', async (req, res) => {
+  try {
+    const { command, cwd, timeout } = req.body || {};
+    if (!command) {
+      return res.status(400).json({ error: 'Missing "command" field' });
+    }
+    const result = await runTerminalExec(command, { cwd, timeout });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // API Chat Endpoint (Supports JSON & SSE Streaming)

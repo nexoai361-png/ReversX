@@ -14,6 +14,15 @@ export interface ChatMessage {
   isStreaming?: boolean;
 }
 
+export interface ActiveToolState {
+  tool: string;
+  status: string;
+  command?: string;
+  progress?: string;
+  startTime: number;
+  isComplete?: boolean;
+}
+
 const KNOWN_AGENTS = [
   { name: '/CoderAgent', desc: 'Code expert' },
   { name: '/DebugAgent', desc: 'Fix bugs' },
@@ -48,8 +57,73 @@ export class ReversXPanel extends LitElement {
   @state() isBackendOnline: boolean = true;
   @state() copiedBlockId: string | null = null;
   @state() jsonViewModes: Record<string, 'pretty' | 'raw'> = {};
+  @state() activeTool: ActiveToolState | null = null;
+  @state() activeToolElapsedMs: number = 0;
 
   private healthInterval: any = null;
+  private toolTimerInterval: any = null;
+
+  private handlePtyCommandEvent = (e: any) => {
+    const cmd = e.detail?.command || 'PTY Command';
+    this.setActiveTool('terminal_exec', 'Executing command directly in PTY Terminal...', cmd);
+    setTimeout(() => {
+      this.markToolComplete('Finished PTY terminal execution');
+    }, 2500);
+  };
+
+  private setActiveTool(toolName: string, status: string, command?: string, progress?: string) {
+    this.clearToolTimer();
+    this.activeTool = {
+      tool: toolName,
+      status,
+      command,
+      progress: progress || 'PTY Execution Active...',
+      startTime: Date.now(),
+      isComplete: false
+    };
+    this.activeToolElapsedMs = 0;
+
+    this.toolTimerInterval = setInterval(() => {
+      if (this.activeTool && !this.activeTool.isComplete) {
+        this.activeToolElapsedMs = Date.now() - this.activeTool.startTime;
+        this.requestUpdate();
+      }
+    }, 100);
+  }
+
+  private markToolComplete(statusMessage?: string) {
+    if (this.activeTool) {
+      this.activeTool = {
+        ...this.activeTool,
+        isComplete: true,
+        status: statusMessage || 'Tool execution completed'
+      };
+      this.clearToolTimer();
+      this.requestUpdate();
+      setTimeout(() => {
+        this.dismissActiveTool();
+      }, 3500);
+    }
+  }
+
+  private dismissActiveTool = () => {
+    this.clearToolTimer();
+    this.activeTool = null;
+    this.activeToolElapsedMs = 0;
+    this.requestUpdate();
+  };
+
+  private clearToolTimer() {
+    if (this.toolTimerInterval) {
+      clearInterval(this.toolTimerInterval);
+      this.toolTimerInterval = null;
+    }
+  }
+
+  private getFormattedElapsed(startTime: number): string {
+    const elapsed = (this.activeToolElapsedMs || (Date.now() - startTime)) / 1000;
+    return elapsed.toFixed(1);
+  }
 
   private handleOutsideClick = (e: MouseEvent) => {
     const path = e.composedPath();
@@ -74,6 +148,7 @@ export class ReversXPanel extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('click', this.handleOutsideClick);
+    window.addEventListener('run-pty-command', this.handlePtyCommandEvent);
     
     this.byokProvider = localStorage.getItem('reversx_byok_provider') || 'openrouter';
     this.byokApiKey = localStorage.getItem('reversx_byok_key') || '';
@@ -86,6 +161,8 @@ export class ReversXPanel extends LitElement {
   disconnectedCallback() {
     super.disconnectedCallback();
     window.removeEventListener('click', this.handleOutsideClick);
+    window.removeEventListener('run-pty-command', this.handlePtyCommandEvent);
+    this.clearToolTimer();
     if (this.healthInterval) {
       clearInterval(this.healthInterval);
     }
@@ -303,6 +380,30 @@ export class ReversXPanel extends LitElement {
 
     this.isGenerating = true;
 
+    // Detect intent for tool indicator
+    const lowerText = text.toLowerCase();
+    let toolName = 'terminal_exec';
+    let statusText = 'Executing command in PTY...';
+
+    if (lowerText.includes('where am i') || lowerText.includes('current directory') || lowerText === 'pwd' || lowerText === 'terminal_cwd') {
+      toolName = 'terminal_cwd';
+      statusText = 'Querying working directory...';
+    } else if (lowerText.includes('timeout') || lowerText.includes('terminal_timeout')) {
+      toolName = 'terminal_timeout';
+      statusText = 'Configuring terminal execution timeout...';
+    } else if (lowerText.includes('exit code') || lowerText.includes('exit status') || lowerText.includes('terminal_exit_code')) {
+      toolName = 'terminal_exit_code';
+      statusText = 'Verifying command exit status...';
+    } else if (lowerText.includes('signal') || lowerText.includes('terminal_signal')) {
+      toolName = 'terminal_signal';
+      statusText = 'Checking process termination signal...';
+    } else if (lowerText.includes('output') || lowerText.includes('stdout') || lowerText.includes('terminal_output')) {
+      toolName = 'terminal_output';
+      statusText = 'Retrieving stdout and stderr output...';
+    }
+
+    this.setActiveTool(toolName, statusText, text);
+
     const aiMsgId = (Date.now() + 1).toString();
     const aiMsg: ChatMessage = {
       id: aiMsgId,
@@ -328,6 +429,7 @@ export class ReversXPanel extends LitElement {
           this.scrollToBottom();
         }
       });
+      this.markToolComplete('Execution finished successfully');
     } catch (err) {
       const msgIdx = this.messages.findIndex(m => m.id === aiMsgId);
       if (msgIdx !== -1) {
@@ -340,6 +442,7 @@ export class ReversXPanel extends LitElement {
         };
         this.messages = newMessages;
       }
+      this.markToolComplete('Execution ended');
     } finally {
       const msgIdx = this.messages.findIndex(m => m.id === aiMsgId);
       if (msgIdx !== -1) {
@@ -602,9 +705,13 @@ export class ReversXPanel extends LitElement {
   private runCommandInTerminal(command: string) {
     const userPermission = confirm(`Do you want to run this command directly in the PTY Terminal?\n\nCommand:\n${command}`);
     if (userPermission) {
+      this.setActiveTool('terminal_exec', 'Running command in PTY Terminal...', command);
       window.dispatchEvent(new CustomEvent('run-pty-command', {
         detail: { command }
       }));
+      setTimeout(() => {
+        this.markToolComplete('Finished PTY terminal execution');
+      }, 2500);
     }
   }
 
@@ -1012,21 +1119,9 @@ export class ReversXPanel extends LitElement {
           `;
         })}
 
-        ${!msg.isStreaming ? html`
+        ${!msg.isStreaming && msg.timestamp ? html`
           <div class="ai-msg-footer">
-            ${!hasCodeOrCommands ? html`
-              <button
-                class="copy-msg-btn ${this.copiedBlockId === msg.id ? 'copied' : ''}"
-                @click="${() => this.copyToClipboard(fullTextToCopy, msg.id)}"
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                </svg>
-                <span>${this.copiedBlockId === msg.id ? 'Copied' : 'Copy Response'}</span>
-              </button>
-            ` : ''}
-            ${msg.timestamp ? html`<span class="msg-time">${msg.timestamp}</span>` : ''}
+            <span class="msg-time">${msg.timestamp}</span>
           </div>
         ` : ''}
       </div>
@@ -1083,6 +1178,58 @@ export class ReversXPanel extends LitElement {
         <input type="file" id="reversx-file-input" style="display:none;" @change="${this.handleFileChange}" />
         <input type="file" id="reversx-image-input" accept="image/*" style="display:none;" @change="${this.handleImageChange}" />
         <input type="file" id="reversx-camera-input" accept="image/*" capture="environment" style="display:none;" @change="${this.handleCameraChange}" />
+
+        <!-- Cursor & VS Code Style Tool Active Overlay Indicator -->
+        ${this.activeTool ? html`
+          <div class="tool-active-overlay" id="tool-active-overlay">
+            <div class="tool-active-card ${this.activeTool.isComplete ? 'completed-card' : ''}">
+              <div class="tool-active-top">
+                <div class="tool-badge-group">
+                  <div class="tool-spinner-wrap">
+                    ${this.activeTool.isComplete ? html`
+                      <svg class="tool-complete-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="20 6 9 17 4 12"></polyline>
+                      </svg>
+                    ` : html`
+                      <svg class="tool-spinner-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                        <circle cx="12" cy="12" r="10" stroke-opacity="0.2"></circle>
+                        <path d="M12 2 a10 10 0 0 1 10 10" stroke="#38bdf8" stroke-linecap="round"></path>
+                      </svg>
+                      <span class="tool-icon">⚡</span>
+                    `}
+                  </div>
+                  <span class="tool-title-badge">${this.activeTool.tool}</span>
+                  <span class="tool-status-pill ${this.activeTool.isComplete ? 'completed' : 'running'}">
+                    <span class="status-pulse-dot"></span>
+                    ${this.activeTool.isComplete ? 'COMPLETED' : 'EXECUTING'}
+                  </span>
+                </div>
+
+                <div class="tool-timer-wrap">
+                  <span class="tool-elapsed-time">${this.getFormattedElapsed(this.activeTool.startTime)}s</span>
+                  <button class="tool-close-btn" @click="${this.dismissActiveTool}" title="Dismiss status">✕</button>
+                </div>
+              </div>
+
+              <div class="tool-active-body">
+                ${this.activeTool.command ? html`
+                  <div class="tool-command-line">
+                    <span class="cmd-prompt">$</span>
+                    <span class="cmd-text">${this.activeTool.command}</span>
+                  </div>
+                ` : ''}
+                <div class="tool-progress-info">
+                  <span class="progress-label">${this.activeTool.status}</span>
+                  <span class="progress-sub">${this.activeTool.progress || 'PTY Process Active'}</span>
+                </div>
+              </div>
+
+              <div class="tool-progress-bar-container">
+                <div class="tool-progress-shimmer ${this.activeTool.isComplete ? 'complete' : ''}"></div>
+              </div>
+            </div>
+          </div>
+        ` : ''}
 
         <!-- Input Container (VS Code Copilot Chat Style) -->
         <div class="ai-input-container">

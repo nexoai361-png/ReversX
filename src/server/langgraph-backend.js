@@ -2,6 +2,7 @@ import express from 'express';
 import { StateGraph, Annotation, START, END } from '@langchain/langgraph';
 import { HumanMessage, AIMessage } from '@langchain/core/messages';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
+import { runTerminalExec, PTY_TERMINAL_TOOLS, executePtyTool } from './terminal-tools.js';
 
 export const langgraphRouter = express.Router();
 langgraphRouter.use(express.json({ limit: '2mb' }));
@@ -174,19 +175,34 @@ async function executionNode(state) {
   // Native Proot-Ubuntu / Termux Agents using LangChain Message Objects
   if (!replyText) {
     const lower = message.toLowerCase();
-    const isCoder = lower.includes('/coderagent') || lower.includes('code') || lower.includes('script') || lower.includes('ssh') || agentName === '/CoderAgent';
-    const isDebug = lower.includes('/debugagent') || lower.includes('debug') || lower.includes('error') || agentName === '/DebugAgent';
-    const isExplain = lower.includes('/explainagent') || lower.includes('explain') || agentName === '/ExplainAgent';
-
-    if (isCoder) {
-      replyText = 'ReversX LangGraph Coder Agent generated terminal script for Proot-Ubuntu:';
-      codeSnippet = `#!/data/data/com.termux/files/usr/bin/bash\n# Proot-Ubuntu & Termux Automation Script\npkg update && pkg upgrade -y\npkg install -y openssh proot-distro\nsshd -p 8022\necho "SSH Server Active on Port 8022!"`;
-    } else if (isDebug) {
-      replyText = 'ReversX LangGraph Debug Agent analyzed your system: All WebSocket PTY and SSH ports are healthy.';
-    } else if (isExplain) {
-      replyText = 'ReversX LangGraph / LangChain Engine: Multi-node state machine running in Proot-Ubuntu backend.';
+    
+    // Check if message is invoking a terminal tool or asking to run command
+    const toolExecMatch = message.match(/^run:\s*(.+)$/i) || message.match(/^(?:exec|run|cmd|terminal_exec)\s+(.+)$/i);
+    const cwdMatch = lower.includes('terminal_cwd') || lower.includes('current directory') || lower.includes('where am i');
+    
+    if (toolExecMatch) {
+      const cmdToRun = toolExecMatch[1].trim();
+      const toolRes = await runTerminalExec(cmdToRun);
+      replyText = `ReversX PTY Terminal Exec Result:\n\n\`\`\`bash\n${toolRes.terminal_output}\n\`\`\`\n\n- **CWD**: \`${toolRes.terminal_cwd}\`\n- **Exit Code**: \`${toolRes.terminal_exit_code}\` (${toolRes.success ? 'Success' : 'Failed'})\n- **Signal**: \`${toolRes.terminal_signal || 'None'}\`\n- **Timeout**: \`${toolRes.terminal_timeout}s\``;
+      codeSnippet = cmdToRun;
+    } else if (cwdMatch) {
+      const toolRes = await executePtyTool('terminal_cwd');
+      replyText = `ReversX PTY Terminal CWD:\n\`\`\`\n${toolRes.terminal_cwd}\n\`\`\``;
     } else {
-      replyText = 'Processed through LangGraph & LangChain dedicated backend agent. Ready for Proot-Ubuntu & Termux commands!';
+      const isCoder = lower.includes('/coderagent') || lower.includes('code') || lower.includes('script') || lower.includes('ssh') || agentName === '/CoderAgent';
+      const isDebug = lower.includes('/debugagent') || lower.includes('debug') || lower.includes('error') || agentName === '/DebugAgent';
+      const isExplain = lower.includes('/explainagent') || lower.includes('explain') || agentName === '/ExplainAgent';
+
+      if (isCoder) {
+        replyText = 'ReversX LangGraph Coder Agent generated terminal script for Proot-Ubuntu:';
+        codeSnippet = `#!/data/data/com.termux/files/usr/bin/bash\n# Proot-Ubuntu & Termux Automation Script\npkg update && pkg upgrade -y\npkg install -y openssh proot-distro\nsshd -p 8022\necho "SSH Server Active on Port 8022!"`;
+      } else if (isDebug) {
+        replyText = 'ReversX LangGraph Debug Agent analyzed your system: All WebSocket PTY and SSH ports are healthy.';
+      } else if (isExplain) {
+        replyText = 'ReversX LangGraph / LangChain Engine: Multi-node state machine running in Proot-Ubuntu backend.';
+      } else {
+        replyText = 'Processed through LangGraph & LangChain dedicated backend agent. Ready for Proot-Ubuntu & Termux commands!';
+      }
     }
   }
 
@@ -243,6 +259,37 @@ langgraphRouter.get('/status', (req, res) => {
     engine: 'LangGraph & LangChain Proot-Ubuntu Dedicated AI Backend',
     timestamp: Date.now()
   });
+});
+
+// PTY Terminal Tools Endpoints for AI Function Calling
+langgraphRouter.get('/terminal/tools', (req, res) => {
+  res.json({ tools: PTY_TERMINAL_TOOLS });
+});
+
+langgraphRouter.post('/terminal/tools/call', async (req, res) => {
+  try {
+    const { tool, arguments: args } = req.body || {};
+    if (!tool) {
+      return res.status(400).json({ error: 'Missing "tool" field' });
+    }
+    const result = await executePtyTool(tool, args || {});
+    res.json({ success: true, tool, result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+langgraphRouter.post('/terminal/exec', async (req, res) => {
+  try {
+    const { command, cwd, timeout } = req.body || {};
+    if (!command) {
+      return res.status(400).json({ error: 'Missing "command" field' });
+    }
+    const result = await runTerminalExec(command, { cwd, timeout });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 langgraphRouter.post('/chat', async (req, res) => {
